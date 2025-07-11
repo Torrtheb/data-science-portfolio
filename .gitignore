@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+*.csv
+*.pkl
+*.h5
+*.zip
+data/
+.DS_Store
+uv.lock
+capstone/

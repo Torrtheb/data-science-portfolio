@@ -1,0 +1,40 @@
+[project]
+name = "ml-2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "black[jupyter]>=25.1.0",
+    "docker>=7.1.0",
+    "fastapi>=0.115.12",
+    "featuretools>=1.31.0",
+    "flask>=3.1.0",
+    "imbalanced-learn>=0.13.0",
+    "ipykernel>=6.29.5",
+    "joblib>=1.4.2",
+    "jupyter>=1.1.1",
+    "lightgbm>=4.6.0",
+    "locust>=2.33.2",
+    "matplotlib>=3.10.1",
+    "missingno>=0.5.2",
+    "nbconvert>=7.16.6",
+    "numpy>=2.2.3",
+    "optuna>=4.2.1",
+    "pandas>=2.2.3",
+    "phik>=0.12.4",
+    "pyproject-toml>=0.1.0",
+    "scikit-learn>=1.6.1",
+    "scikit-optimize>=0.10.2",
+    "seaborn>=0.13.2",
+    "setuptools>=76.1.0",
+    "stats>=0.1.2a0",
+    "statsmodels>=0.14.4",
+    "uvicorn>=0.34.0",
+    "xgboost>=2.1.4",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29.5",
+]
