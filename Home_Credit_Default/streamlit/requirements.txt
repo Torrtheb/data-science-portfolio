@@ -1,0 +1,14 @@
+pandas==2.2.3
+numpy==2.2.6
+scipy==1.15.3
+pyarrow==20.0.0
+dask==2025.5.1
+scikit-learn==1.6.1
+catboost==1.2.8
+lightgbm==4.6.0
+joblib==1.5.1
+streamlit-autorefresh==1.0.1
+streamlit==1.46.1
+pydantic==2.11.7
+pydantic-core==2.33.2
+google-cloud-storage==3.1.1

@@ -1,0 +1,41 @@
+[project]
+name = "capstone"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "asyncio==3.4.3",
+    "black>=25.1.0",
+    "catboost==1.2.8",
+    "dask==2025.5.1",
+    "fastapi==0.115.14",
+    "featuretools>=1.31.0",
+    "flask>=3.1.1",
+    "google-cloud-storage>=3.1.1",
+    "imbalanced-learn>=0.13.0",
+    "ipykernel>=6.29.5",
+    "joblib==1.5.1",
+    "jupyter>=1.1.1",
+    "lightgbm==4.6.0",
+    "matplotlib>=3.10.1",
+    "numpy==2.2.6",
+    "pandas==2.2.3",
+    "phik>=0.12.4",
+    "pyarrow==20.0.0",
+    "pydantic==2.11.7",
+    "pydantic-core==2.33.2",
+    "pytest>=8.4.1",
+    "scikit-learn==1.6.1",
+    "scikit-optimize>=0.10.2",
+    "scipy==1.15.3",
+    "seaborn>=0.13.2",
+    "shap>=0.47.2",
+    "statsmodels>=0.14.4",
+    "streamlit>=1.46.1",
+    "streamlit-autorefresh>=1.0.1",
+    "streamlit-shap>=1.0.2",
+    "tabulate>=0.9.0",
+    "uvicorn==0.35.0",
+    "xgboost>=3.0.2",
+]
