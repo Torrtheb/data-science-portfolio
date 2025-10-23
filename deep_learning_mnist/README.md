@@ -63,4 +63,3 @@ On the test data, the best local validation accuracy was found to be 0.988, whic
 
 # Acknowledgements
 - https://www.kaggle.com/competitions/digit-recognizer/overview
-- ChatGPT.
