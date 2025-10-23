@@ -17,6 +17,7 @@ Here are some projects that I have completed using data available to the public 
 
 | Project | Description | Key Techniques & Tools |
 |---------|-------------|------------------------|
+| 🧮 [MNIST Digit Classifier (PyTorch + Lightning)](./deep_learning_mnist/) | Digit classification with an MLP using PyTorch and Lightning. Clean training pipeline with TensorBoard logging, optional cosine LR scheduler (and ablations to disable), reproducible loaders, GPU support (CUDA/MPS), data augmentation, and torchinfo summaries. | PyTorch, PyTorch Lightning, torchvision transforms, schedulers, Optuna (optional), torchinfo, TensorBoard |
 | 🏠 [Home Credit Default Risk — Streamlit App](./Home_Credit_Default/) | Credit-risk scoring using real loan-application data. Deployed a Streamlit web app so Home Credit employees can search an application ID and instantly see predicted default probability. | Streamlit, LightGBM, feature selection, SHAP interpretability |
 | 🚀 [Spaceship Titanic Survival Prediction](./Spaceship_Titanic/) | Kaggle challenge predicting passenger survival on a fictional interstellar voyage. Extensive feature engineering, handling of missing values, and model comparison. | scikit-learn pipeline, hist-gb & LightGBM, cross-validation, SHAP |
 | ❤️ [Stroke Prediction](./Stroke_Prediction/) | Binary classifier estimating stroke risk from demographic & lifestyle features. Comparison of logistic regression and balanced random forest models. | Logistic Regression, balanced random forest, class-imbalance handling, ROC-AUC, calibration curve |
@@ -27,9 +28,9 @@ Here are some projects that I have completed using data available to the public 
 ## Tools & Skills
 
 - **Languages:** Python, SQL
-- **Libraries:** Pandas, NumPy, scikit-learn, Matplotlib, Seaborn
+- **Libraries:** Pandas, NumPy, scikit-learn, Matplotlib, Seaborn, PyTorch, PyTorch Lightning, torchvision
 - **Tools:** Jupyter Notebook, Git, Tableau, VS Code, Streamlit
-- **Specialties:** Data wrangling, EDA, machine learning, model interpretation, visualization, binary classification
+- **Specialties:** Data wrangling, EDA, machine learning, deep learning (computer vision & image processing), model interpretation, visualization, binary classification
 
 # Let's Connect
 email: bethtorrance9@gmail.com
