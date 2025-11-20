@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+__init__.py
 .venv/
 *.csv
 *.pkl
@@ -8,3 +9,15 @@ __pycache__/
 data/
 .DS_Store
 uv.lock
+
+# IDE / notebook artifacts
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# Streamlit / local config
+.streamlit/
+
+# Large derived data files (kept outside git; use Kaggle/GCS instead)
+deploy/*.parquet
+streamlit/*.parquet

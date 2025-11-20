@@ -12,6 +12,7 @@ from google.cloud import storage
 from preprocess_memory_efficient import (
     preprocess_raw_input_memory_efficient,
     load_csvs_memory_efficient,
+    preprocess_prospective_input,
 )
 
 # ─────────────────────────────── Logging ─────────────────────────────────────
@@ -36,10 +37,47 @@ def load_valid_ids() -> set[int]:
         ids = pd.read_csv(tmp_path, usecols=["SK_ID_CURR"])
         tmp_path.unlink(missing_ok=True)
     else:
-        ids = pd.read_csv("valid_data.csv", usecols=["SK_ID_CURR"])
+        base = Path(__file__).resolve().parents[1]
+        candidates = [
+            base / "valid_data.csv",
+            base / "notebooks_and_initial_tables/notebooks/valid_data.csv",
+        ]
+        csv_path = next((p for p in candidates if p.exists()), None)
+        if csv_path is None:
+            raise FileNotFoundError("valid_data.csv not found in expected locations")
+        ids = pd.read_csv(csv_path, usecols=["SK_ID_CURR"])
 
     logger.info("Loaded %d valid IDs", len(ids))
     return set(ids["SK_ID_CURR"].tolist())
+
+
+@st.cache_data(show_spinner=False)
+def load_valid_df() -> pd.DataFrame:
+    """
+    Load the full valid_data.csv into a DataFrame (local or GCS).
+
+    Used for random sampling of client IDs; cached so we only hit disk once.
+    """
+    bucket = os.getenv("GCS_BUCKET")
+    blob = os.getenv("GCS_VALID_DATA")
+
+    if bucket and blob:
+        tmp_path = Path("/tmp/valid_data_full.csv")
+        storage.Client().bucket(bucket).blob(blob).download_to_filename(tmp_path)
+        df = pd.read_csv(tmp_path)
+        tmp_path.unlink(missing_ok=True)
+    else:
+        base = Path(__file__).resolve().parents[1]
+        candidates = [
+            base / "valid_data.csv",
+            base / "notebooks_and_initial_tables/notebooks/valid_data.csv",
+        ]
+        csv_path = next((p for p in candidates if p.exists()), None)
+        if csv_path is None:
+            raise FileNotFoundError("valid_data.csv not found in expected locations")
+        df = pd.read_csv(csv_path)
+
+    return df
 
 
 def _download_blob(bucket: str, blob: str, dest: str) -> None:
@@ -51,6 +89,19 @@ def _download_blob(bucket: str, blob: str, dest: str) -> None:
 
 
 # ────────────────────────── Model & data loaders ─────────────────────────────
+@st.cache_data(show_spinner=False)
+def get_template_client_id() -> int:
+    """
+    Return a stable reference SK_ID_CURR from the validation universe.
+
+    This ID is used as a template for prospective applicants: we keep
+    its external bureau / previous-loan aggregates, but overwrite
+    application-level fields with user inputs.
+    """
+    ids = sorted(load_valid_ids())
+    return ids[0]
+
+
 @st.cache_resource(show_spinner=False)
 def load_model():
     """Load LightGBM model from GCS or local file."""
@@ -64,8 +115,19 @@ def load_model():
         Path(tmp_path).unlink(missing_ok=True)
         logger.info("Loaded model from GCS")
     else:
-        model_ = joblib.load("best_lgbm_model.pkl")
-        logger.info("Loaded model from local disk")
+        base = Path(__file__).resolve().parents[1]
+        candidates = [
+            base / "best_lgbm_model.pkl",
+            base / "notebooks_and_initial_tables/notebooks/best_lgbm_model.pkl",
+            Path("best_lgbm_model.pkl"),
+        ]
+        model_path = next((p for p in candidates if p.exists()), None)
+        if model_path is None:
+            raise FileNotFoundError(
+                "best_lgbm_model.pkl not found in expected locations"
+            )
+        model_ = joblib.load(model_path)
+        logger.info("Loaded model from local disk: %s", model_path)
 
     return model_
 
@@ -81,20 +143,9 @@ def initialize_data_sources() -> bool:
         return False
 
 
-@st.cache_data(show_spinner=False, ttl=3600)
 def _sample_client_ids(n_samples: int = 100) -> pd.DataFrame:
     """Return *n_samples* random IDs for demo / testing UI."""
-    bucket = os.getenv("GCS_BUCKET")
-    blob = os.getenv("GCS_VALID_DATA")
-
-    if bucket and blob:
-        tmp_path = "/tmp/valid_data_sample.csv"
-        _download_blob(bucket, blob, tmp_path)
-        df = pd.read_csv(tmp_path, usecols=["SK_ID_CURR"])
-        Path(tmp_path).unlink(missing_ok=True)
-    else:
-        df = pd.read_csv("valid_data.csv", usecols=["SK_ID_CURR"])
-
+    df = load_valid_df()[["SK_ID_CURR"]]
     return df.sample(min(n_samples, len(df))).reset_index(drop=True)
 
 
@@ -120,7 +171,15 @@ def predict_default_risk(
         valid_df = pd.read_csv(tmp_path)
         tmp_path.unlink(missing_ok=True)
     else:
-        valid_df = pd.read_csv("valid_data.csv")
+        base = Path(__file__).resolve().parents[1]
+        candidates = [
+            base / "valid_data.csv",
+            base / "notebooks_and_initial_tables/notebooks/valid_data.csv",
+        ]
+        csv_path = next((p for p in candidates if p.exists()), None)
+        if csv_path is None:
+            raise FileNotFoundError("valid_data.csv not found in expected locations")
+        valid_df = pd.read_csv(csv_path)
 
     client_data = valid_df[valid_df["SK_ID_CURR"] == client_id]
     if client_data.empty:
@@ -179,7 +238,9 @@ with st.spinner("Initialising resources …"):
 st.subheader("Client Selection")
 
 mode = st.radio(
-    "Choose mode:", ["Specific Client ID", "Random Sample"], horizontal=True
+    "Choose mode:",
+    ["Specific Client ID", "Random Sample", "Prospective Applicant"],
+    horizontal=True,
 )
 
 if mode == "Specific Client ID":
@@ -205,7 +266,7 @@ if mode == "Specific Client ID":
                     st.warning("🟡 Medium Risk")
                 else:
                     st.error("🔴 High Risk")
-else:
+elif mode == "Random Sample":
     if st.button("🎲 Predict Random Client"):
         with st.spinner("Sampling & scoring …"):
             try:
@@ -221,3 +282,132 @@ else:
                     st.warning("🟡 Medium Risk")
                 else:
                     st.error("🔴 High Risk")
+else:
+    st.markdown(
+        "Use this mode as an **approximate pre-screening tool**. "
+        "The estimate is based on your self-reported information and "
+        "typical external data; the actual production model also "
+        "uses full credit-bureau and historical repayment information."
+    )
+
+    with st.form("prospective_form"):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            age_years = st.number_input(
+                "Age (years)", min_value=18, max_value=80, value=35
+            )
+            years_employed = st.number_input(
+                "Years in current employment", min_value=0.0, max_value=60.0, value=5.0
+            )
+            ext_score = st.slider(
+                "External credit score (0 = poor, 1 = excellent)",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.5,
+                step=0.01,
+            )
+            annual_income = st.number_input(
+                "Annual income (dataset currency units)",
+                min_value=0.0,
+                value=30000.0,
+                step=1000.0,
+            )
+            loan_amount = st.number_input(
+                "Requested loan amount (dataset currency units)",
+                min_value=0.0,
+                value=200000.0,
+                step=10000.0,
+            )
+            annuity = st.number_input(
+                "Expected monthly instalment (annuity, dataset currency units)",
+                min_value=0.0,
+                value=8000.0,
+                step=500.0,
+            )
+
+        with col2:
+            gender = st.selectbox("Gender", ["F", "M"])
+            family_status = st.selectbox(
+                "Family status",
+                [
+                    "Single / not married",
+                    "Married",
+                    "Separated",
+                    "Widow",
+                    "Civil marriage",
+                ],
+            )
+            education = st.selectbox(
+                "Highest education",
+                [
+                    "Secondary / secondary special",
+                    "Higher education",
+                    "Incomplete higher",
+                    "Lower secondary",
+                    "Academic degree",
+                ],
+            )
+            housing = st.selectbox(
+                "Housing type",
+                [
+                    "House / apartment",
+                    "Rented apartment",
+                    "With parents",
+                    "Municipal apartment",
+                    "Office apartment",
+                    "Co-op apartment",
+                ],
+            )
+            owns_car = st.checkbox("Owns a car", value=False)
+            owns_realty = st.checkbox("Owns real estate", value=False)
+
+        submit_prospective = st.form_submit_button("💡 Estimate Default Risk")
+
+    if submit_prospective:
+        with st.spinner("Estimating risk …"):
+            try:
+                manual_data = {
+                    "DAYS_BIRTH": int(-365.25 * age_years),
+                    "DAYS_EMPLOYED": int(-365.25 * years_employed),
+                    # Approximate external credit scores: use the same value
+                    # for EXT_SOURCE_1/2/3 within [0, 1].
+                    "EXT_SOURCE_1": ext_score,
+                    "EXT_SOURCE_2": ext_score,
+                    "EXT_SOURCE_3": ext_score,
+                    "AMT_INCOME_TOTAL": annual_income,
+                    "AMT_CREDIT": loan_amount,
+                    "AMT_ANNUITY": annuity,
+                    "CODE_GENDER": gender,
+                    "NAME_FAMILY_STATUS": family_status,
+                    "NAME_EDUCATION_TYPE": education,
+                    "NAME_HOUSING_TYPE": housing,
+                    "FLAG_OWN_CAR": "Y" if owns_car else "N",
+                    "FLAG_OWN_REALTY": "Y" if owns_realty else "N",
+                }
+
+                X = preprocess_prospective_input(manual_data)
+                model = load_model()
+                X = X.reindex(columns=model.feature_name_, fill_value=np.nan).astype(
+                    np.float32
+                )
+                if hasattr(model, "predict_proba"):
+                    risk = float(model.predict_proba(X)[0, 1])
+                else:
+                    risk = float(model.predict(X)[0])
+            except Exception as exc:
+                st.error(f"Estimation failed: {exc}")
+            else:
+                st.success(f"Estimated default-risk probability: **{risk:.2%}**")
+                if risk < 0.30:
+                    st.info(
+                        "🟢 Low estimated risk (based on limited self-reported data)."
+                    )
+                elif risk < 0.70:
+                    st.warning(
+                        "🟡 Medium estimated risk – additional information could change this."
+                    )
+                else:
+                    st.error(
+                        "🔴 High estimated risk – improving credit history or reducing debt may help."
+                    )

@@ -21,11 +21,12 @@ from sklearn.metrics import (
     roc_auc_score,
     make_scorer,
 )
-from typing import List, Tuple, Dict, Any, Union, Hashable
+from typing import List, Tuple, Dict, Any, Union
 from pandas import DataFrame
 import re
 
 # Utility functions for DataFrame inspection and analysis
+
 
 def print_df_info(df: pd.DataFrame) -> None:
     """
@@ -148,6 +149,7 @@ def add_dup_counts(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # Plotting functions for categorical and numerical variables
+
 
 def percent_dist(data: pd.DataFrame, var: str) -> None:
     """
@@ -398,6 +400,10 @@ def plot_multiple_qq(features: List[str], df: pd.DataFrame, n_cols: int = 4) -> 
     None
         Displays a grid of Q-Q plots for the selected features.
     """
+    palette = sns.color_palette("tab10")
+    point_color = palette[0]
+    line_color = palette[1]
+
     n = len(features)
     n_rows = int(np.ceil(n / n_cols))
 
@@ -407,6 +413,12 @@ def plot_multiple_qq(features: List[str], df: pd.DataFrame, n_cols: int = 4) -> 
     for i, feature in enumerate(features):
         ax = axes[i]
         plot_qq(df[feature], ax)
+        lines = ax.get_lines()
+        if len(lines) >= 1:
+            lines[0].set_color(point_color)
+        if len(lines) >= 2:
+            lines[1].set_color(line_color)
+
         ax.set_title(feature)
 
     for j in range(i + 1, len(axes)):
@@ -416,8 +428,8 @@ def plot_multiple_qq(features: List[str], df: pd.DataFrame, n_cols: int = 4) -> 
     plt.show()
 
 
-
 # Statistical tests and analysis functions
+
 
 def chi_squared_test(df: pd.DataFrame, var1: str, var2: str) -> None:
     """
@@ -617,6 +629,7 @@ def evaluate_vif(df: pd.DataFrame) -> pd.DataFrame:
 
 # Data prepcrocessing and transformation functions
 
+
 def cap_outliers(
     df: pd.DataFrame,
     columns: List[str],
@@ -770,18 +783,34 @@ def plot_log_transformed_distributions(
     None
         Displays the plots.
     """
+    palette = sns.color_palette("tab10")
+    original_color = palette[0]
+    log_color = palette[1]
+
     for col in columns:
         if (df[col] + 1 <= 0).any():
             print(f"Skipping {col}: contains non-positive values.")
             continue
 
         fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        sns.histplot(df[col].dropna(), kde=True, ax=axes[0], bins=30, color="skyblue")
+        sns.histplot(
+            df[col].dropna(),
+            kde=True,
+            ax=axes[0],
+            bins=30,
+            color=original_color,
+        )
         axes[0].set_title(f"Original: {col}")
         axes[0].set_xlabel(col)
 
         log_data = np.log1p(df[col].dropna())
-        sns.histplot(log_data, kde=True, ax=axes[1], bins=30, color="orange")
+        sns.histplot(
+            log_data,
+            kde=True,
+            ax=axes[1],
+            bins=30,
+            color=log_color,
+        )
         axes[1].set_title(f"Log-Transformed: {col}")
         axes[1].set_xlabel(f"log1p({col})")
 
@@ -808,7 +837,9 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [re.sub(r"[^\w_]", "_", col) for col in df.columns]
     return df
 
+
 # Feature evaluation and selection functions
+
 
 def evaluate_feature_counts(
     model: BaseEstimator,
@@ -1195,6 +1226,10 @@ def plot_cdf_by_target(
     None
         Displays the plot on the provided Axes.
     """
+    palette = sns.color_palette("tab10")
+    color_target_0 = palette[0]
+    color_target_1 = palette[1]
+
     data_0 = df[df[target_col] == 0][feature].dropna()
     data_1 = df[df[target_col] == 1][feature].dropna()
 
@@ -1224,11 +1259,10 @@ def plot_cdf_by_target(
         bbox=dict(facecolor="white", edgecolor="black"),
     )
 
-    ax.plot(x0, y0, label="TARGET = 0", color="blue")
-    ax.plot(x1, y1, label="TARGET = 1", color="orange")
+    ax.plot(x0, y0, label="TARGET = 0", color=color_target_0)
+    ax.plot(x1, y1, label="TARGET = 1", color=color_target_1)
 
     ax.set_title(f"Cumulative Distribution: {feature}", fontsize=12)
     ax.set_xlabel(feature)
     ax.set_ylabel("CDF")
     ax.legend()
-

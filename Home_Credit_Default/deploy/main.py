@@ -12,12 +12,10 @@ from preprocess import (
     load_model,
 )
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Set up fastapi lifespan to load model and CSVs lazily
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -107,7 +105,6 @@ class ApplicationInput(BaseModel):
     FLAG_DOCUMENT_21: Optional[int] = 0
 
 
-# Define the response model for predictions
 class PredictionResponse(BaseModel):
     SK_ID_CURR: int
     default_probability: float

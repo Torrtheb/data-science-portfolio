@@ -45,7 +45,7 @@ can be sent to the model's google cloud url: https://homecredit-app-547010730225
 
 Alternatively, the streamlit app can be accessed via: https://my-streamlit-app-547010730225.northamerica-northeast1.run.app. 
 
-To use the app, one must choose to input a specific client id or a random sample, and click the predict risk button. Note: Due to cloud deployment characteristics, the first click on the Random Client button click loads the model and data, and the second click provides the prediction results.
+To use the app, one must choose to input a specific client id or a random sample, and click the predict risk button. The existing client mode uses the full production model with bureau and previous loan data. The prospective applicant mode is an approximate pre-screening method using self-reported features with bureau features set to neutral values. 
 
 # Notebook structure: 
 
@@ -96,21 +96,26 @@ Notebook 5 (test_data):
 
 This project had objective of classifying Home Credit customers applying for loans. This is quite important to ensure that Home Credit as a profitable company, as it needs to minimize the chance that any loans given out will not be repayed. To do this, the data was explored and statistically tested before applying various machine learning gradient boosted models, and tuning these to obtain the highest accuracy possible. 
 
-Next, a light-gb, a catboost, a hist-gb, and a voting model were trained and implemented to predict the default probability of Home Credit's customers. The best performing model was found to be the voting model, which takes and votes on predictions from the three boosted models. This got a performance of 0.792 for roc-auc for the validation dataset, which is the main evaluation metric. When this model was evaluated with the test dataset on Kaggle's platform, it obtained a score of 0.78879. 
+Next, a light-gb, a catboost, a hist-gb, and a voting model were trained and implemented to predict the default probability of Home Credit's customers. The best performing model was found to be the voting model, which takes and votes on predictions from the three boosted models. This got a performance of 0.792 for roc-auc for the validation dataset, which is the main evaluation metric. 
 
 However, the fastest and more explainable model is light-gb, with roc-auc score of 0.790 for the validation dataset, and 0.78709 for the test dataset on Kaggle's platform. This light-gb model was chosen for deployment, as speed and confidence in model reasoning are deemed more important than a slight decrease in performance for Home Credit's organization. Both of these roc-auc scores are above 0.78, which is the objective score for this project. 
 
-From looking at the SHAP summary plot for this model, key observations include: 
+## Model interpretability (SHAP)
+
+From looking at the SHAP summary plot for the tuned light-gb model, key observations include: 
 
 - External credit rating scores are by far the most important in determining the default probability of a customer. In each instance, it has been seen in SHAP summary plots that having high external credit scores lead to a lower likelihood of a customer defaulting on a loan. 
-- Sociodemographic factors also influence a customer’s likelihood of defaulting on their Home Credit loan, notably: the length of their employment, age, gender, marriage status, if they own a car, and if they have higher education or not. 
-- Finally, economic factors and repayment tendencies describing the customer’s loan influence their default probability, notably: the annuity on their current loan application, the credit/annuity ratio of their current loan application, the amount of debt they had on previous loans at the credit bureau, or their late payment behaviour on previous Home Credit loans. 
+- Sociodemographic factors also influence a customer’s likelihood of defaulting on their Home Credit loan, notably: the length of their employment, age, gender, marriage status, if they own a car, and if they have higher education or not. Clients with longer employement histories, who have higher education, and who are married are less likely to default on a loan. 
+- Finally, economic factors and repayment tendencies describing the customer’s loan influence their default probability, notably: the annuity on their current loan application, the credit/annuity ratio of their current loan application, the amount of debt they had on previous loans at the credit bureau, or their late payment behaviour on previous Home Credit loans. Clients with lower annuities and reasonable loan sizes are not over-leveraged relative to income/risk quality and have low default risk. Clients with high debt burdens and adverse repayment history have increased default risk. 
+
+Overall, the model behaves in a way that matches business intuition. Credit quality, stability, and financial stability (repayment history, current debts, annuity of loan) are main drivers of default risk. These patterns should be monitored over time to ensure they remain stable and do not inadvertently encode unfair bias.
 
 Project improvements include 
 - The models could be trained with more recent data, as this Kaggle competition is 8 years old. This would to keep the model relevant and up to date and ensure that Home Credit continues to provide their loaning services to the maximum amount of trustworthy customers. 
 - In addition, infrastructure for more thorough testing and monitoring for model deployment could be implemented, to ensure that the model's performance and input data stay constant over time. 
 - It would also be interesting to have trained other (simpler) model types, such as a logistic regression model with a smaller number of features. As long as obtained roc-auc score does not drop significantly with the simpler model, Home Credit would be able to pinpoint exactly why a customer's loan application is rejected or not, and by exactly how much each feature influences the acceptance decision. 
 - Threshold tuning or model calibrated could have been performed to test model reliability.
+- Exploring auto feature engineering libraries such as featuretools would help to find new features that could boost model performance more. 
 - Finally, adding in a more user-friendly and speedy interface would be useful to the streamlit application webpage. 
 
 
@@ -120,4 +125,3 @@ Project improvements include
 - https://en.wikipedia.org/wiki/Home_Credit
 - Anna Montoya, inversion, KirillOdintsov, and Martin Kotek. Home Credit Default Risk. https://kaggle.com/competitions/home-credit-default-risk, 2018. Kaggle.
 - https://www.kaggle.com/competitions/home-credit-default-risk/discussion/64821
-- ChatGPT.
