@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+import os
 import re
 import sys
 from functools import lru_cache
@@ -10,6 +11,7 @@ import dask.dataframe as dd
 import joblib
 import numpy as np
 import pandas as pd
+from google.cloud import storage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -68,32 +70,58 @@ def load_csvs_memory_efficient() -> None:
 
     if bureau_final is None:
         logger.info("📦 Loading bureau_final.parquet (lazy)…")
-        candidates = [
-            PROJECT_ROOT / "deploy" / "bureau_final.parquet",
-            Path(__file__).resolve().parent / "bureau_final.parquet",
-        ]
-        bureau_path = next((p for p in candidates if p.exists()), None)
-        if bureau_path is None:
-            raise FileNotFoundError(
-                "bureau_final.parquet not found in expected locations"
-            )
+        bucket = os.getenv("GCS_BUCKET")
+        bureau_blob = os.getenv("GCS_BUREAU_PARQUET")
 
-        bureau_final = dd.read_parquet(bureau_path, engine="pyarrow")
+        if bucket and bureau_blob:
+            tmp_path = Path("/tmp/bureau_final.parquet")
+            storage.Client().bucket(bucket).blob(bureau_blob).download_to_filename(
+                tmp_path
+            )
+            bureau_df = dd.read_parquet(tmp_path, engine="pyarrow")
+            logger.info("✅ bureau_final loaded from GCS: %s", bureau_blob)
+        else:
+            candidates = [
+                PROJECT_ROOT / "deploy" / "bureau_final.parquet",
+                Path(__file__).resolve().parent / "bureau_final.parquet",
+            ]
+            bureau_path = next((p for p in candidates if p.exists()), None)
+            if bureau_path is None:
+                raise FileNotFoundError(
+                    "bureau_final.parquet not found in expected locations"
+                )
+            bureau_df = dd.read_parquet(bureau_path, engine="pyarrow")
+            logger.info("✅ bureau_final loaded from local path: %s", bureau_path)
+
+        bureau_final = bureau_df
         logger.info("✅ bureau_final: %d columns", len(bureau_final.columns))
 
     if p_final_merged is None:
         logger.info("📦 Loading p_final_merged.parquet (lazy)…")
-        candidates = [
-            PROJECT_ROOT / "deploy" / "p_final_merged.parquet",
-            Path(__file__).resolve().parent / "p_final_merged.parquet",
-        ]
-        prev_path = next((p for p in candidates if p.exists()), None)
-        if prev_path is None:
-            raise FileNotFoundError(
-                "p_final_merged.parquet not found in expected locations"
-            )
+        bucket = os.getenv("GCS_BUCKET")
+        prev_blob = os.getenv("GCS_PREV_PARQUET")
 
-        p_final_merged = dd.read_parquet(prev_path, engine="pyarrow")
+        if bucket and prev_blob:
+            tmp_path = Path("/tmp/p_final_merged.parquet")
+            storage.Client().bucket(bucket).blob(prev_blob).download_to_filename(
+                tmp_path
+            )
+            prev_df = dd.read_parquet(tmp_path, engine="pyarrow")
+            logger.info("✅ p_final_merged loaded from GCS: %s", prev_blob)
+        else:
+            candidates = [
+                PROJECT_ROOT / "deploy" / "p_final_merged.parquet",
+                Path(__file__).resolve().parent / "p_final_merged.parquet",
+            ]
+            prev_path = next((p for p in candidates if p.exists()), None)
+            if prev_path is None:
+                raise FileNotFoundError(
+                    "p_final_merged.parquet not found in expected locations"
+                )
+            prev_df = dd.read_parquet(prev_path, engine="pyarrow")
+            logger.info("✅ p_final_merged loaded from local path: %s", prev_path)
+
+        p_final_merged = prev_df
         logger.info("✅ p_final_merged: %d columns", len(p_final_merged.columns))
 
 
