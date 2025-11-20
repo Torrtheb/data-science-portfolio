@@ -494,3 +494,6 @@ HOUSING_TYPE_GROUP_MAP = {
     "With parents": "With parents",
     "Co-op apartment": "Other apartment",
 }
+
+# Public alias used by serving / Streamlit code
+SELECTED_FEATURES = selected_features
