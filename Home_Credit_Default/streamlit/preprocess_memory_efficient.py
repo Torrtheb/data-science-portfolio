@@ -22,6 +22,7 @@ from deploy.feature_config import (
     INCOME_TYPE_GROUP_MAP,
     ORGANIZATION_TYPE_GROUP_MAP,
     HOUSING_TYPE_GROUP_MAP,
+    SELECTED_FEATURES,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,32 +35,9 @@ p_final_merged: dd.DataFrame | None = None
 
 # ────────────────────────────── Helper: model columns ────────────────────────
 
-
-@lru_cache(maxsize=1)
-def get_selected_features() -> list[str]:
-    """Read feature_name_ from *best_lgbm_model.pkl* once and cache it."""
-    candidate_paths = [
-        PROJECT_ROOT / "best_lgbm_model.pkl",
-        PROJECT_ROOT / "notebooks_and_initial_tables/notebooks/best_lgbm_model.pkl",
-        Path("best_lgbm_model.pkl"),
-    ]
-
-    model_path = next((p for p in candidate_paths if p.exists()), None)
-    if model_path is None:
-        raise FileNotFoundError(
-            "best_lgbm_model.pkl not found – cannot derive selected_features"
-        )
-
-    model = joblib.load(model_path)
-    names = getattr(model, "feature_name_", None) or getattr(
-        model, "feature_names", None
-    )
-    if not names:
-        raise AttributeError("Model file has no feature name attribute")
-    return list(names)
-
-
-selected_features = get_selected_features()
+# Reuse the SELECTED_FEATURES list from the training/serving pipeline so that
+# the Streamlit app stays consistent with the deployed model.
+selected_features = SELECTED_FEATURES
 
 # ────────────────────────────── Parquet loaders ──────────────────────────────
 
