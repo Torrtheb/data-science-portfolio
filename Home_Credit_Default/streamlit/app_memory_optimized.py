@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────── Helpers ─────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_storage_client() -> storage.Client:
-    # Expect `GCP_SERVICE_ACCOUNT_JSON` to be a secrets *table*, not a raw JSON string.
     key_info = dict(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     creds = service_account.Credentials.from_service_account_info(key_info)
     project_id = key_info.get("project_id")
@@ -39,13 +38,9 @@ def get_storage_client() -> storage.Client:
 def _secret(name: str, default: str = "") -> str:
     """Safe helper to read a string secret, checking both top-level and nested tables."""
     try:
-        # Top-level secret
         if name in st.secrets:
             return str(st.secrets[name])
-        # Nested under GCP_SERVICE_ACCOUNT_JSON (in case of mis-indentation)
         svc = st.secrets.get("GCP_SERVICE_ACCOUNT_JSON", {})
-        # `st.secrets[...]` returns a Secrets object (mapping-like, but not a dict),
-        # so we convert to a plain dict before lookup.
         try:
             svc_dict = dict(svc) if svc is not None else {}
         except TypeError:
