@@ -164,13 +164,15 @@ def load_model():
 
 @st.cache_resource(show_spinner=False)
 def initialize_data_sources() -> bool:
-    """Fire the memory-efficient parquet readers once."""
-    try:
-        load_csvs_memory_efficient()
-        return True
-    except Exception as exc:
-        logger.error("Failed to initialise external data: %s", exc)
-        return False
+    """
+    No-op initialiser for external parquet sources.
+
+    For the portfolio / Streamlit deployment we rely only on the
+    model and application-level features, so the large parquet
+    aggregates are not required.
+    """
+    logger.info("Skipping external parquet initialisation (not required for demo).")
+    return True
 
 
 def _sample_client_ids(n_samples: int = 100) -> pd.DataFrame:
@@ -184,7 +186,7 @@ def predict_default_risk(
     client_id: int,
     manual_data: Optional[dict] | None = None,
 ) -> float:
-    """Return probability of default for *client_id* using minimal memory."""
+    """Return probability of default for *client_id* based on application data only."""
 
     valid_ids = load_valid_ids()
     if client_id not in valid_ids:
@@ -192,35 +194,20 @@ def predict_default_risk(
             f"Client {client_id} is not present in validation data – probability not calculated."
         )
 
-    bucket = os.getenv("GCS_BUCKET")
-    blob = os.getenv("GCS_VALID_DATA")
-
-    if bucket and blob:
-        tmp_path = Path("/tmp/valid_data_full.csv")
-        _download_blob(bucket, blob, str(tmp_path))
-        valid_df = pd.read_csv(tmp_path)
-        tmp_path.unlink(missing_ok=True)
-    else:
-        base = Path(__file__).resolve().parents[1]
-        candidates = [
-            base / "valid_data.csv",
-            base / "notebooks_and_initial_tables/notebooks/valid_data.csv",
-        ]
-        csv_path = next((p for p in candidates if p.exists()), None)
-        if csv_path is None:
-            raise FileNotFoundError("valid_data.csv not found in expected locations")
-        valid_df = pd.read_csv(csv_path)
+    # Load validation dataframe from local CSV (or GCS if configured)
+    valid_df = load_valid_df()
 
     client_data = valid_df[valid_df["SK_ID_CURR"] == client_id]
     if client_data.empty:
         raise ValueError(f"Client {client_id} data not found in valid_data.csv")
 
     raw = client_data.iloc[0].to_dict()
-
     if manual_data:
         raw.update(manual_data)
 
-    X = preprocess_raw_input_memory_efficient(raw)
+    # For deployment simplicity we re-use the prospective pipeline,
+    # which does not depend on large external parquet aggregates.
+    X = preprocess_prospective_input(raw)
 
     model = load_model()
     X = X.reindex(columns=model.feature_name_, fill_value=np.nan).astype(np.float32)

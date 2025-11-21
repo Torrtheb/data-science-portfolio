@@ -47,8 +47,12 @@ def _secret(name: str, default: str = "") -> str:
         if name in st.secrets:
             return str(st.secrets[name])
         svc = st.secrets.get("GCP_SERVICE_ACCOUNT_JSON", {})
-        if isinstance(svc, dict) and name in svc:
-            return str(svc[name])
+        try:
+            svc_dict = dict(svc) if svc is not None else {}
+        except TypeError:
+            svc_dict = {}
+        if name in svc_dict:
+            return str(svc_dict[name])
     except Exception:
         pass
     return default
