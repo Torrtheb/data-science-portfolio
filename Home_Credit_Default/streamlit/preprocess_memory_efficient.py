@@ -56,8 +56,10 @@ def load_csvs_memory_efficient() -> None:
 
     if bureau_final is None:
         logger.info("📦 Loading bureau_final.parquet (lazy)…")
-        bucket = os.getenv("GCS_BUCKET")
-        bureau_blob = os.getenv("GCS_BUREAU_PARQUET")
+        bucket = os.getenv("GCS_BUCKET") or st.secrets.get("GCS_BUCKET", "")
+        bureau_blob = os.getenv("GCS_BUREAU_PARQUET") or st.secrets.get(
+            "GCS_BUREAU_PARQUET", ""
+        )
 
         if bucket and bureau_blob:
             tmp_path = Path("/tmp/bureau_final.parquet")
@@ -83,8 +85,10 @@ def load_csvs_memory_efficient() -> None:
 
     if p_final_merged is None:
         logger.info("📦 Loading p_final_merged.parquet (lazy)…")
-        bucket = os.getenv("GCS_BUCKET")
-        prev_blob = os.getenv("GCS_PREV_PARQUET")
+        bucket = os.getenv("GCS_BUCKET") or st.secrets.get("GCS_BUCKET", "")
+        prev_blob = os.getenv("GCS_PREV_PARQUET") or st.secrets.get(
+            "GCS_PREV_PARQUET", ""
+        )
 
         if bucket and prev_blob:
             tmp_path = Path("/tmp/p_final_merged.parquet")

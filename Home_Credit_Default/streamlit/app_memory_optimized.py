@@ -39,8 +39,8 @@ def get_storage_client() -> storage.Client:
 @st.cache_data(show_spinner=False)
 def load_valid_ids() -> set[int]:
     """Read SK_ID_CURR universe once from *valid_data.csv* (local or GCS)."""
-    bucket = os.getenv("GCS_BUCKET")
-    blob = os.getenv("GCS_VALID_DATA")
+    bucket = os.getenv("GCS_BUCKET") or st.secrets.get("GCS_BUCKET", "")
+    blob = os.getenv("GCS_VALID_DATA") or st.secrets.get("GCS_VALID_DATA", "")
 
     if bucket and blob:
         tmp_path = Path("/tmp/valid_data.csv")
@@ -70,8 +70,8 @@ def load_valid_df() -> pd.DataFrame:
 
     Used for random sampling of client IDs; cached so we only hit disk once.
     """
-    bucket = os.getenv("GCS_BUCKET")
-    blob = os.getenv("GCS_VALID_DATA")
+    bucket = os.getenv("GCS_BUCKET") or st.secrets.get("GCS_BUCKET", "")
+    blob = os.getenv("GCS_VALID_DATA") or st.secrets.get("GCS_VALID_DATA", "")
 
     if bucket and blob:
         tmp_path = Path("/tmp/valid_data_full.csv")
@@ -119,8 +119,8 @@ def get_template_client_id() -> int:
 @st.cache_resource(show_spinner=False)
 def load_model():
     """Load LightGBM model from GCS or local file."""
-    bucket = os.getenv("GCS_BUCKET")
-    blob = os.getenv("GCS_MODEL")
+    bucket = os.getenv("GCS_BUCKET") or st.secrets.get("GCS_BUCKET", "")
+    blob = os.getenv("GCS_MODEL") or st.secrets.get("GCS_MODEL", "")
 
     if bucket and blob:
         tmp_path = "/tmp/best_lgbm_model.pkl"
