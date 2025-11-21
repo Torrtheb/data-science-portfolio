@@ -37,11 +37,18 @@ def get_storage_client() -> storage.Client:
 
 
 def _secret(name: str, default: str = "") -> str:
-    """Safe helper to read a string secret."""
+    """Safe helper to read a string secret, checking both top-level and nested tables."""
     try:
-        return str(st.secrets[name])
+        # Top-level secret
+        if name in st.secrets:
+            return str(st.secrets[name])
+        # Nested under GCP_SERVICE_ACCOUNT_JSON (in case of mis-indentation)
+        svc = st.secrets.get("GCP_SERVICE_ACCOUNT_JSON", {})
+        if isinstance(svc, dict) and name in svc:
+            return str(svc[name])
     except Exception:
-        return default
+        pass
+    return default
 
 
 @st.cache_data(show_spinner=False)

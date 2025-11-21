@@ -41,6 +41,19 @@ def get_storage_client() -> storage.Client:
     project_id = key_info.get("project_id")
     return storage.Client(project=project_id, credentials=creds)
 
+
+def _secret(name: str, default: str = "") -> str:
+    """Safe helper to read a string secret, checking both top-level and nested tables."""
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+        svc = st.secrets.get("GCP_SERVICE_ACCOUNT_JSON", {})
+        if isinstance(svc, dict) and name in svc:
+            return str(svc[name])
+    except Exception:
+        pass
+    return default
+
 # ────────────────────────────── Lazy global datasets ─────────────────────────
 
 bureau_final: dd.DataFrame | None = None
@@ -56,9 +69,9 @@ def load_csvs_memory_efficient() -> None:
 
     if bureau_final is None:
         logger.info("📦 Loading bureau_final.parquet (lazy)…")
-        bucket = os.getenv("GCS_BUCKET") or str(st.secrets.get("GCS_BUCKET", ""))
-        bureau_blob = os.getenv("GCS_BUREAU_PARQUET") or str(
-            st.secrets.get("GCS_BUREAU_PARQUET", "")
+        bucket = os.getenv("GCS_BUCKET") or _secret("GCS_BUCKET", "")
+        bureau_blob = os.getenv("GCS_BUREAU_PARQUET") or _secret(
+            "GCS_BUREAU_PARQUET", ""
         )
 
         if bucket and bureau_blob:
@@ -85,10 +98,8 @@ def load_csvs_memory_efficient() -> None:
 
     if p_final_merged is None:
         logger.info("📦 Loading p_final_merged.parquet (lazy)…")
-        bucket = os.getenv("GCS_BUCKET") or str(st.secrets.get("GCS_BUCKET", ""))
-        prev_blob = os.getenv("GCS_PREV_PARQUET") or str(
-            st.secrets.get("GCS_PREV_PARQUET", "")
-        )
+        bucket = os.getenv("GCS_BUCKET") or _secret("GCS_BUCKET", "")
+        prev_blob = os.getenv("GCS_PREV_PARQUET") or _secret("GCS_PREV_PARQUET", "")
 
         if bucket and prev_blob:
             tmp_path = Path("/tmp/p_final_merged.parquet")
