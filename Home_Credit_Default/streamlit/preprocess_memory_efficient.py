@@ -34,8 +34,9 @@ logger.setLevel(logging.INFO)
 
 @st.cache_resource(show_spinner=False)
 def get_storage_client() -> storage.Client:
-    """Create a GCS client using the service account JSON in Streamlit secrets."""
-    key_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    """Create a GCS client using the service account info in Streamlit secrets."""
+    # Expect `GCP_SERVICE_ACCOUNT_JSON` to be a secrets *table*, not a raw JSON string.
+    key_info = dict(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     creds = service_account.Credentials.from_service_account_info(key_info)
     project_id = key_info.get("project_id")
     return storage.Client(project=project_id, credentials=creds)

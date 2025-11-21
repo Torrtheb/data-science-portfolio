@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────── Helpers ─────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_storage_client() -> storage.Client:
-    key_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    # Expect `GCP_SERVICE_ACCOUNT_JSON` to be a secrets *table*, not a raw JSON string.
+    key_info = dict(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
     creds = service_account.Credentials.from_service_account_info(key_info)
     project_id = key_info.get("project_id")
     return storage.Client(project=project_id, credentials=creds)
@@ -383,8 +384,6 @@ else:
                 manual_data = {
                     "DAYS_BIRTH": int(-365.25 * age_years),
                     "DAYS_EMPLOYED": int(-365.25 * years_employed),
-                    # Approximate external credit scores: use the same value
-                    # for EXT_SOURCE_1/2/3 within [0, 1].
                     "EXT_SOURCE_1": ext_score,
                     "EXT_SOURCE_2": ext_score,
                     "EXT_SOURCE_3": ext_score,
