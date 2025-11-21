@@ -1,5 +1,6 @@
 from __future__ import annotations
 import gc
+import json
 import logging
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from google.cloud import storage
+from google.oauth2 import service_account
 from preprocess_memory_efficient import (
     preprocess_raw_input_memory_efficient,
     load_csvs_memory_efficient,
@@ -25,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────── Helpers ─────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def get_storage_client() -> storage.Client:
+    key_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    creds = service_account.Credentials.from_service_account_info(key_info)
+    project_id = key_info.get("project_id")
+    return storage.Client(project=project_id, credentials=creds)
+
+
 @st.cache_data(show_spinner=False)
 def load_valid_ids() -> set[int]:
     """Read SK_ID_CURR universe once from *valid_data.csv* (local or GCS)."""
@@ -33,7 +43,8 @@ def load_valid_ids() -> set[int]:
 
     if bucket and blob:
         tmp_path = Path("/tmp/valid_data.csv")
-        storage.Client().bucket(bucket).blob(blob).download_to_filename(tmp_path)
+        client = get_storage_client()
+        client.bucket(bucket).blob(blob).download_to_filename(tmp_path)
         ids = pd.read_csv(tmp_path, usecols=["SK_ID_CURR"])
         tmp_path.unlink(missing_ok=True)
     else:
@@ -63,7 +74,8 @@ def load_valid_df() -> pd.DataFrame:
 
     if bucket and blob:
         tmp_path = Path("/tmp/valid_data_full.csv")
-        storage.Client().bucket(bucket).blob(blob).download_to_filename(tmp_path)
+        client = get_storage_client()
+        client.bucket(bucket).blob(blob).download_to_filename(tmp_path)
         df = pd.read_csv(tmp_path)
         tmp_path.unlink(missing_ok=True)
     else:
@@ -83,7 +95,8 @@ def load_valid_df() -> pd.DataFrame:
 def _download_blob(bucket: str, blob: str, dest: str) -> None:
     """Download *blob* from *bucket* to *dest* with basic retries."""
     try:
-        storage.Client().bucket(bucket).blob(blob).download_to_filename(dest)
+        client = get_storage_client()
+        client.bucket(bucket).blob(blob).download_to_filename(dest)
     except Exception as exc:
         raise RuntimeError(f"Failed to download {blob} from {bucket}: {exc}") from exc
 

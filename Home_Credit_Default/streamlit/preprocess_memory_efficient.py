@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import logging
 import os
 import re
@@ -11,7 +12,9 @@ import dask.dataframe as dd
 import joblib
 import numpy as np
 import pandas as pd
+import streamlit as st
 from google.cloud import storage
+from google.oauth2 import service_account
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -27,6 +30,15 @@ from deploy.feature_config import (
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+@st.cache_resource(show_spinner=False)
+def get_storage_client() -> storage.Client:
+    """Create a GCS client using the service account JSON in Streamlit secrets."""
+    key_info = json.loads(st.secrets["GCP_SERVICE_ACCOUNT_JSON"])
+    creds = service_account.Credentials.from_service_account_info(key_info)
+    project_id = key_info.get("project_id")
+    return storage.Client(project=project_id, credentials=creds)
 
 # ────────────────────────────── Lazy global datasets ─────────────────────────
 
@@ -48,9 +60,8 @@ def load_csvs_memory_efficient() -> None:
 
         if bucket and bureau_blob:
             tmp_path = Path("/tmp/bureau_final.parquet")
-            storage.Client().bucket(bucket).blob(bureau_blob).download_to_filename(
-                tmp_path
-            )
+            client = get_storage_client()
+            client.bucket(bucket).blob(bureau_blob).download_to_filename(tmp_path)
             bureau_df = dd.read_parquet(tmp_path, engine="pyarrow")
             logger.info("✅ bureau_final loaded from GCS: %s", bureau_blob)
         else:
@@ -76,9 +87,8 @@ def load_csvs_memory_efficient() -> None:
 
         if bucket and prev_blob:
             tmp_path = Path("/tmp/p_final_merged.parquet")
-            storage.Client().bucket(bucket).blob(prev_blob).download_to_filename(
-                tmp_path
-            )
+            client = get_storage_client()
+            client.bucket(bucket).blob(prev_blob).download_to_filename(tmp_path)
             prev_df = dd.read_parquet(tmp_path, engine="pyarrow")
             logger.info("✅ p_final_merged loaded from GCS: %s", prev_blob)
         else:
