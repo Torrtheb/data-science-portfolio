@@ -32,11 +32,6 @@ logger.setLevel(logging.INFO)
 
 bureau_final: dd.DataFrame | None = None
 p_final_merged: dd.DataFrame | None = None
-
-# ────────────────────────────── Helper: model columns ────────────────────────
-
-# Reuse the SELECTED_FEATURES list from the training/serving pipeline so that
-# the Streamlit app stays consistent with the deployed model.
 selected_features = SELECTED_FEATURES
 
 # ────────────────────────────── Parquet loaders ──────────────────────────────

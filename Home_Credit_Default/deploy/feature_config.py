@@ -495,5 +495,4 @@ HOUSING_TYPE_GROUP_MAP = {
     "Co-op apartment": "Other apartment",
 }
 
-# Public alias used by serving / Streamlit code
 SELECTED_FEATURES = selected_features
