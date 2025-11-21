@@ -18,6 +18,9 @@ uv.lock
 # Streamlit / local config
 .streamlit/
 
-# Large derived data files (kept outside git; use Kaggle/GCS instead)
+# Large derived data files 
 deploy/*.parquet
 streamlit/*.parquet
+
+!notebooks_and_initial_tables/notebooks/valid_data.csv
+!notebooks_and_initial_tables/notebooks/best_lgbm_model.pkl
