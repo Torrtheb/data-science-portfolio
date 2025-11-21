@@ -193,8 +193,6 @@ def predict_default_risk(
         raise ValueError(
             f"Client {client_id} is not present in validation data – probability not calculated."
         )
-
-    # Load validation dataframe from local CSV (or GCS if configured)
     valid_df = load_valid_df()
 
     client_data = valid_df[valid_df["SK_ID_CURR"] == client_id]
@@ -204,9 +202,6 @@ def predict_default_risk(
     raw = client_data.iloc[0].to_dict()
     if manual_data:
         raw.update(manual_data)
-
-    # For deployment simplicity we re-use the prospective pipeline,
-    # which does not depend on large external parquet aggregates.
     X = preprocess_prospective_input(raw)
 
     model = load_model()
