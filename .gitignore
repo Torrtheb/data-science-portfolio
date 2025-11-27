@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 *.egg-info/
 *.egg-info/**
+Home_Credit_Default/notebooks_and_initial_tables/tables/
