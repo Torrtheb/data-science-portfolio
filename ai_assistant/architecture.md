@@ -7,24 +7,24 @@ This document summarizes how the Next.js frontend, FastAPI backend, and the agen
 ```mermaid
 flowchart LR
   subgraph Client
-    UI[Next.js UI<br/>App Router]
+    UI["Next.js UI<br/>App Router"]
   end
 
   subgraph Frontend
-    Proxy[API Proxy<br/>/api/back/*]
-    Auth[NextAuth<br/>Credentials/Google]
-    DBF[NextAuth DB<br/>(Postgres)]
+    Proxy["API Proxy<br/>/api/back/*"]
+    Auth["NextAuth<br/>Credentials/Google"]
+    DBF["NextAuth DB<br/>(Postgres)"]
   end
 
   subgraph Backend
-    API[FastAPI]
-    Graph[LangGraph Agent]
-    Tools[Tool Registry<br/>booking, wallets, email, facts]
+    API["FastAPI"]
+    Graph["LangGraph Agent"]
+    Tools["Tool Registry<br/>booking, wallets, email, facts"]
   end
 
   subgraph Data
-    PG[(Postgres + pgvector)]
-    SMTP[(SMTP)]
+    PG["Postgres + pgvector"]
+    SMTP["SMTP"]
   end
 
   UI -->|JWT session| Auth

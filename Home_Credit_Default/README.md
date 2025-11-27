@@ -1,7 +1,6 @@
 #  Project
 
-The goal of this project is to correctly predict if a Home Credit customer will default on a loan or not, and explain key reasoning for the rejection or acceptance of a Home Credit loan application. 
-This is a binary classification problem using supervised machine learning to assign probabilities of a given client defaulting on a loan for this test dataset.
+This project builds and deploys a credit-risk model to predict whether a Home Credit customer will default on a loan, and to explain why a given application is accepted or rejected. The core task is a supervised binary classification problem, which is to estimate the probability that a client will default, using both application-level data and historical bureau information.
 
 The evaluation metric for this project is the area under receiver operator characteristic (ROC) curve (AUC). The ROC curve is a plot of true positive rate versus false positive rate for different thresholds. The area under this curve gives a measure of overall model performance, where a score of 1 is a perfect classifier, and a score of 0.5 is the same as random guessing. This is obtained using a model's predicted probabilities. The objective roc-auc score for this project is 0.78. 
 
@@ -67,7 +66,7 @@ from Google Cloud Storage, via a service account configured in *st.secrets*. Thi
 For approximate pre-screening of **prospective applicants**, the app uses only application-level features and sets bureau aggregates to neutral values.
 
 
-# Notebook structure: 
+## Notebook structure: 
 
 Project Flow: 
 
