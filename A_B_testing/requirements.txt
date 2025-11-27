@@ -1,9 +1,0 @@
-numpy
-pandas
-scipy
-statsmodels
-matplotlib
-seaborn
-ipykernel
-jupyter
-
