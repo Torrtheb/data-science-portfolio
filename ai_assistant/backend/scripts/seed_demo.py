@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -40,7 +41,9 @@ OWNER_ID = (
     or "owner-demo-1"
 )
 CLIENT_ID = os.getenv("SEED_CLIENT_ID") or "client-demo-1"
-OWNER_EMAIL = os.getenv("SEED_OWNER_EMAIL") or os.getenv("OWNER_EMAIL") or "owner@example.com"
+OWNER_EMAIL = (
+    os.getenv("SEED_OWNER_EMAIL") or os.getenv("OWNER_EMAIL") or "owner@example.com"
+)
 CLIENT_EMAIL = os.getenv("SEED_CLIENT_EMAIL") or "dev1@example.com"
 TZ = os.getenv("SEED_TIMEZONE") or "America/New_York"
 
@@ -125,13 +128,11 @@ def seed():
                 )
             )
         if not db.query(Person).filter(Person.account_id == acct.id).first():
-            db.add(
-                Person(account_id=acct.id, full_name="Dev One", email=CLIENT_EMAIL)
-            )
+            db.add(Person(account_id=acct.id, full_name="Dev One", email=CLIENT_EMAIL))
 
         # Opening: next Friday 09:00–12:00 local
         now = datetime.now(ZoneInfo(TZ))
-        next_fri = _next_weekday(now, 4) 
+        next_fri = _next_weekday(now, 4)
         start_local = next_fri.replace(hour=9, minute=0, second=0, microsecond=0)
         end_local = next_fri.replace(hour=12, minute=0, second=0, microsecond=0)
         start_utc = start_local.astimezone(timezone.utc)
@@ -158,7 +159,7 @@ def seed():
             )
 
         # Time off: next Wednesday 13:00–15:00 local
-        next_wed = _next_weekday(now, 2)  
+        next_wed = _next_weekday(now, 2)
         toff_start = next_wed.replace(hour=13, minute=0, second=0, microsecond=0)
         toff_end = next_wed.replace(hour=15, minute=0, second=0, microsecond=0)
         toff_start_utc = toff_start.astimezone(timezone.utc)

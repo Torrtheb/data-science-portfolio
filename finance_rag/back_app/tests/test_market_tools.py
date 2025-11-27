@@ -6,7 +6,6 @@ import pytest
 import back_app.llm.tools as tools
 
 
-
 @pytest.fixture(autouse=True)
 def set_api_key(monkeypatch):
     # Ensure FINNHUB_API_KEY is present so _fh_get doesn't return config error
@@ -16,14 +15,21 @@ def set_api_key(monkeypatch):
 
 # -------------------- get_price --------------------
 
+
 @pytest.mark.asyncio
 async def test_get_price_equity_success(monkeypatch):
     async def fake_fh_get(path, params):
         assert path == "/quote"
         assert params["symbol"] == "AAPL"
         return {
-            "c": 195.5, "o": 194.0, "h": 196.0, "l": 193.8,
-            "pc": 193.0, "d": 2.5, "dp": 1.30, "t": 1700000000,
+            "c": 195.5,
+            "o": 194.0,
+            "h": 196.0,
+            "l": 193.8,
+            "pc": 193.0,
+            "d": 2.5,
+            "dp": 1.30,
+            "t": 1700000000,
         }
 
     monkeypatch.setattr(tools, "_fh_get", fake_fh_get, raising=True)
@@ -48,11 +54,16 @@ async def test_get_price_crypto_fallback(monkeypatch):
         if path == "/crypto/candle":
             # note: get_price asks for last hour at resolution=1
             assert params["symbol"] == "BINANCE:BTCUSDT"
-            return {"s": "ok", "c": [100, 101, 102], "t": [clock["now"] - 10, clock["now"] - 5, clock["now"]]}
+            return {
+                "s": "ok",
+                "c": [100, 101, 102],
+                "t": [clock["now"] - 10, clock["now"] - 5, clock["now"]],
+            }
         raise AssertionError(f"Unexpected path {path}")
 
     # Patch global time.time because get_price uses time.time() directly
     import time as real_time
+
     monkeypatch.setattr(real_time, "time", fake_time, raising=True)
     monkeypatch.setattr(tools, "_fh_get", fake_fh_get, raising=True)
 
@@ -71,15 +82,28 @@ async def test_get_price_validation_empty():
 
 # -------------------- screen_equities --------------------
 
+
 @pytest.mark.asyncio
 async def test_screen_equities_filters(monkeypatch):
     # Return varying metrics; only MSFT should pass thresholds below
     async def fake_fh_get(path, params):
         assert path == "/company-basic-financials"
         if params["symbol"] == "AAPL":
-            return {"metric": {"marketCapitalization": 900_000_000_000, "peBasicExclExtraTTM": 45, "dividendYieldTTM": 0.005}}
+            return {
+                "metric": {
+                    "marketCapitalization": 900_000_000_000,
+                    "peBasicExclExtraTTM": 45,
+                    "dividendYieldTTM": 0.005,
+                }
+            }
         if params["symbol"] == "MSFT":
-            return {"metric": {"marketCapitalization": 2_400_000_000_000, "peTTM": 32, "dividendYieldTTM": 0.009}}
+            return {
+                "metric": {
+                    "marketCapitalization": 2_400_000_000_000,
+                    "peTTM": 32,
+                    "dividendYieldTTM": 0.009,
+                }
+            }
         if params["symbol"] == "BROKEN":
             return {"error": "api_error", "detail": "bad"}
         return {"metric": {}}
@@ -87,7 +111,9 @@ async def test_screen_equities_filters(monkeypatch):
     monkeypatch.setattr(tools, "_fh_get", fake_fh_get, raising=True)
     rows = await tools.screen_equities(
         ["AAPL", "MSFT", "BROKEN", "UNKNOWN"],
-        min_market_cap=1e12, min_dividend_yield=0.008, max_pe=40.0
+        min_market_cap=1e12,
+        min_dividend_yield=0.008,
+        max_pe=40.0,
     )
     assert len(rows) == 1
     assert rows[0]["symbol"] == "MSFT"
@@ -97,15 +123,28 @@ async def test_screen_equities_filters(monkeypatch):
 
 # -------------------- search_symbol --------------------
 
+
 @pytest.mark.asyncio
 async def test_search_symbol_normalizes(monkeypatch):
     async def fake_fh_get(path, params):
         assert path == "/search"
         assert params["q"] == "apple"
-        return {"result": [
-            {"symbol": "AAPL", "description": "Apple Inc", "type": "Common Stock", "mic": "XNAS"},
-            {"symbol": "APPL34", "description": "Apple Inc DRN", "type": "DR", "mic": "BVMF"},
-        ]}
+        return {
+            "result": [
+                {
+                    "symbol": "AAPL",
+                    "description": "Apple Inc",
+                    "type": "Common Stock",
+                    "mic": "XNAS",
+                },
+                {
+                    "symbol": "APPL34",
+                    "description": "Apple Inc DRN",
+                    "type": "DR",
+                    "mic": "BVMF",
+                },
+            ]
+        }
 
     monkeypatch.setattr(tools, "_fh_get", fake_fh_get, raising=True)
     out = await tools.search_symbol("apple")
@@ -121,6 +160,7 @@ async def test_search_symbol_empty_query_returns_empty():
 
 # -------------------- get_profile --------------------
 
+
 @pytest.mark.asyncio
 async def test_get_profile_happy(monkeypatch):
     async def fake_fh_get(path, params):
@@ -132,7 +172,7 @@ async def test_get_profile_happy(monkeypatch):
             "ticker": "AAPL",
             "marketCapitalization": 3_000_000_000_000,
             "ipo": "1980-12-12",
-            "logo": "https://logo"
+            "logo": "https://logo",
         }
 
     monkeypatch.setattr(tools, "_fh_get", fake_fh_get, raising=True)
@@ -155,14 +195,29 @@ async def test_get_profile_error_passthrough(monkeypatch):
 
 # -------------------- get_recommendation_trends --------------------
 
+
 @pytest.mark.asyncio
 async def test_get_recommendation_trends_happy(monkeypatch):
     async def fake_fh_get(path, params):
         assert path == "/stock/recommendation"
         # API returns an array; function selects first element and adds 'symbol'
         return [
-            {"period": "2025-08-01", "strongBuy": 10, "buy": 20, "hold": 5, "sell": 1, "strongSell": 0},
-            {"period": "2025-07-01", "strongBuy": 8, "buy": 18, "hold": 6, "sell": 2, "strongSell": 0},
+            {
+                "period": "2025-08-01",
+                "strongBuy": 10,
+                "buy": 20,
+                "hold": 5,
+                "sell": 1,
+                "strongSell": 0,
+            },
+            {
+                "period": "2025-07-01",
+                "strongBuy": 8,
+                "buy": 18,
+                "hold": 6,
+                "sell": 2,
+                "strongSell": 0,
+            },
         ]
 
     monkeypatch.setattr(tools, "_fh_get", fake_fh_get, raising=True)
@@ -183,6 +238,7 @@ async def test_get_recommendation_trends_no_data(monkeypatch):
 
 
 # -------------------- get_candles --------------------
+
 
 @pytest.mark.asyncio
 async def test_get_candles_stock_endpoint(monkeypatch):

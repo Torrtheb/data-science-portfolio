@@ -14,7 +14,9 @@ os.environ.setdefault("ENV", "test")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("RAG_ENABLED", "true")
 os.environ.setdefault("VECTORSTORE", "qdrant")
-os.environ.setdefault("QDRANT_URL", "http://dummy-qdrant:6333")  # won't be called (we mock)
+os.environ.setdefault(
+    "QDRANT_URL", "http://dummy-qdrant:6333"
+)  # won't be called (we mock)
 os.environ.setdefault("QDRANT_COLLECTION", "finance_docs_test")
 os.environ.setdefault("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 os.environ.setdefault("MCP_PROXY_ENABLE", "false")  # avoid MCP startup in tests
@@ -31,10 +33,12 @@ os.environ.setdefault("TWELVEDATA_API_KEY", "test-twelvedata")
 from back_app.main import app
 from back_app.core.db import init_db
 
+
 @pytest.fixture(scope="session")
 def anyio_backend():
     # httpx AsyncClient uses anyio under the hood
     return "asyncio"
+
 
 @pytest.fixture(scope="session")
 def fastapi_app():

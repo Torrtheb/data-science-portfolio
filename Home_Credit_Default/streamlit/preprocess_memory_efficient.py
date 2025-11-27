@@ -57,6 +57,7 @@ def _secret(name: str, default: str = "") -> str:
         pass
     return default
 
+
 # ────────────────────────────── Lazy global datasets ─────────────────────────
 
 bureau_final: dd.DataFrame | None = None

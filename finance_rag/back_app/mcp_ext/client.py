@@ -99,6 +99,7 @@ def _collect_text_blocks(result) -> list[str]:
         pass
     return out
 
+
 def _best_structured(result):
     """
     Extract the most structured representation from an MCP call result.
@@ -125,7 +126,9 @@ def _best_structured(result):
         pass
     return None
 
+
 # ----------------------------- Session handling ------------------------------
+
 
 @asynccontextmanager
 async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
@@ -153,12 +156,20 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
     try:
         if u.scheme == "stdio":
             extra_args = shlex.split(os.getenv("MCP_WORLD_BANK_ARGS", ""))
-            env_cmd = (os.getenv("MCP_WORLD_BANK_CMD") or "world-bank-mcp-server").strip()
+            env_cmd = (
+                os.getenv("MCP_WORLD_BANK_CMD") or "world-bank-mcp-server"
+            ).strip()
             env_parts = shlex.split(env_cmd) if env_cmd else []
 
             candidates: list[tuple[str, list[str], str]] = []
             if env_parts:
-                candidates.append((env_parts[0], env_parts[1:] + extra_args, "env:$MCP_WORLD_BANK_CMD"))
+                candidates.append(
+                    (
+                        env_parts[0],
+                        env_parts[1:] + extra_args,
+                        "env:$MCP_WORLD_BANK_CMD",
+                    )
+                )
             for exe in ("world-bank-mcp-server", "world_bank_mcp_server"):
                 candidates.append((exe, list(extra_args), f"console:{exe}"))
 
@@ -167,7 +178,7 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
                 "world_bank_mcp_server.server",
                 "world_bank_mcp_server.cli",
                 "world_bank_mcp_server.app",
-                "world_bank_mcp_server",  
+                "world_bank_mcp_server",
             ):
                 candidates.append((py, ["-m", mod, *extra_args], f"module:{mod}"))
 
@@ -194,7 +205,9 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
                     params = StdioServerParameters(command=cmd, args=args)
                     async with stdio_client(params) as (read, write, _sid):
                         async with ClientSession(read, write) as session:
-                            await asyncio.wait_for(session.initialize(), timeout=timeout)
+                            await asyncio.wait_for(
+                                session.initialize(), timeout=timeout
+                            )
                             try:
                                 yield session
                             finally:
@@ -207,8 +220,13 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
 
             raise RuntimeError(
                 "Could not launch World Bank MCP server via stdio.\n"
-                + "Attempts:\n  - " + "\n  - ".join(attempts_log)
-                + (f"\nLast error: {type(last_err).__name__}: {last_err}" if last_err else "")
+                + "Attempts:\n  - "
+                + "\n  - ".join(attempts_log)
+                + (
+                    f"\nLast error: {type(last_err).__name__}: {last_err}"
+                    if last_err
+                    else ""
+                )
             )
 
         # --------------------- HTTP / HTTPS transports ---------------------
@@ -219,7 +237,9 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
                 try:
                     async with streamablehttp_client(server_url) as (read, write, _sid):
                         async with ClientSession(read, write) as session:
-                            await asyncio.wait_for(session.initialize(), timeout=timeout)
+                            await asyncio.wait_for(
+                                session.initialize(), timeout=timeout
+                            )
                             try:
                                 yield session
                             finally:
@@ -228,7 +248,9 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
                 except Exception:
                     async with sse_client(server_url) as (read, write, _sid):
                         async with ClientSession(read, write) as session:
-                            await asyncio.wait_for(session.initialize(), timeout=timeout)
+                            await asyncio.wait_for(
+                                session.initialize(), timeout=timeout
+                            )
                             try:
                                 yield session
                             finally:
@@ -258,7 +280,9 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
         raise RuntimeError(f"Unsupported MCP URL: {server_url}")
 
     except asyncio.TimeoutError:
-        raise RuntimeError(f"MCP initialize timed out after {timeout:.1f}s ({server_url})")
+        raise RuntimeError(
+            f"MCP initialize timed out after {timeout:.1f}s ({server_url})"
+        )
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         raise RuntimeError(f"MCP endpoint unreachable: {server_url} ({e})")
     except Exception as e:
@@ -266,6 +290,7 @@ async def connect(server_url: str, timeout: float = DEFAULT_TIMEOUT):
             f"MCP endpoint unreachable or failed handshake: {server_url} "
             f"({type(e).__name__}: {e})"
         )
+
 
 # --------------------------------- Remote Procedure Calls --------------------------------------
 
@@ -374,6 +399,7 @@ async def call_tool(
                 else result
             ),
         }
+
 
 # --------------------------- World Bank convenience ---------------------------
 

@@ -9,10 +9,14 @@ from back_app.routers import price as price_mod
 
 # ---------------------- _get_finnhub_token ----------------------------------
 
+
 def test_get_finnhub_token_prefers_settings_secret(monkeypatch):
     class SecretStr:
-        def __init__(self, v): self._v = v
-        def get_secret_value(self): return self._v
+        def __init__(self, v):
+            self._v = v
+
+        def get_secret_value(self):
+            return self._v
 
     fake_settings = types.SimpleNamespace(finnhub_api_key=SecretStr("from_settings"))
     monkeypatch.setattr(price_mod, "settings", fake_settings, raising=False)
@@ -38,6 +42,7 @@ def test_get_finnhub_token_env_fallback(monkeypatch):
 
 # ---------------------- text helpers ----------------------------------------
 
+
 @pytest.mark.parametrize(
     "s,expected",
     [
@@ -59,9 +64,9 @@ def test_norm_tokenizes_basic():
 @pytest.mark.parametrize(
     "q,looks_like",
     [
-        ("AAPL", False),         # pure uppercase ticker
-        ("aapl", True),          # lowercase → likely name-ish
-        ("apple", True),         # single word but lowercase
+        ("AAPL", False),  # pure uppercase ticker
+        ("aapl", True),  # lowercase → likely name-ish
+        ("apple", True),  # single word but lowercase
         ("Procter & Gamble", True),  # spaces
         ("BRK.B", False),
         ("MSFT  ", False),
@@ -102,7 +107,10 @@ def test_root(sym, root):
         ("VOD:GB", "VOD.L"),
         ("BHP:AU", "BHP.AX"),
         ("0700:HK", "0700.HK"),
-        ("TSLA.US", "TSLA"),   # _canon_local does NOT strip .US here, it strips .US in normalization only when exact pattern; here returns "TSLA.US" uppercased
+        (
+            "TSLA.US",
+            "TSLA",
+        ),  # _canon_local does NOT strip .US here, it strips .US in normalization only when exact pattern; here returns "TSLA.US" uppercased
         ("TSLA:US", "TSLA"),
         ("brk a", "BRK.A"),
         ("BF a", "BF.A"),
@@ -115,18 +123,22 @@ def test_canon_local_mappings(raw, canon):
 
 # ---------------------- symbol support heuristics ----------------------------
 
+
 @pytest.mark.parametrize(
     "sym,ok",
     [
         ("AAPL", True),
         ("MSFT", True),
-        ("BRK.B", True),   # class share
-        ("XYZ.U", True),   # SPAC units
+        ("BRK.B", True),  # class share
+        ("XYZ.U", True),  # SPAC units
         ("ABC.WS", True),  # warrants
         ("SHOP.TO", False),
         ("VOD.L", False),
         ("BHP.AX", False),
-        ("TSLA.US", False),   # tail not 1-char and not U/WS; not in NON_US_SUFFIXES → reject
+        (
+            "TSLA.US",
+            False,
+        ),  # tail not 1-char and not U/WS; not in NON_US_SUFFIXES → reject
         ("", False),
         (None, False),
         ("TOO_LONG", False),
@@ -138,6 +150,7 @@ def test_is_supported_equity_symbol(sym, ok):
 
 
 # ---------------------- search hinting & exchange weighting ------------------
+
 
 def test_hint_prefs_detects_regions():
     prefs = price_mod._hint_prefs("search Canada TSX and London LSE please")
@@ -165,6 +178,7 @@ def test_exchange_hint_weight_prefers_us_and_respects_prefs():
 
 # ---------------------- candidate scoring ------------------------------------
 
+
 def test_score_candidate_orders_by_exchange_and_cap_and_tokens():
     q_tokens = ["apple", "inc"]
     prefs = price_mod._hint_prefs("")  # neutral
@@ -177,8 +191,12 @@ def test_score_candidate_orders_by_exchange_and_cap_and_tokens():
     prof_us_big = {"exchange": "NASDAQ", "market_cap": 2_500_000_000_000}
     prof_non_us_small = {"exchange": "LSE", "market_cap": 1_000_000}
 
-    score_us = price_mod._score_candidate(q_tokens, cand, prof_us_big, prefs, bare_roots={"AAPL"})
-    score_uk = price_mod._score_candidate(q_tokens, cand, prof_non_us_small, prefs, bare_roots={"AAPL"})
+    score_us = price_mod._score_candidate(
+        q_tokens, cand, prof_us_big, prefs, bare_roots={"AAPL"}
+    )
+    score_uk = price_mod._score_candidate(
+        q_tokens, cand, prof_non_us_small, prefs, bare_roots={"AAPL"}
+    )
 
     # US + huge cap + bare root match should beat non-US small cap
     assert score_us > score_uk
@@ -187,6 +205,7 @@ def test_score_candidate_orders_by_exchange_and_cap_and_tokens():
 
 
 # ---------------------- cache wrapper around resolver ------------------------
+
 
 @pytest.mark.asyncio
 async def test_resolve_name_cached_uses_cache(monkeypatch):
@@ -211,6 +230,7 @@ async def test_resolve_name_cached_uses_cache(monkeypatch):
 
 
 # ---------------------- client construction ----------------------------------
+
 
 @pytest.mark.anyio
 async def test_client_sets_stable_headers_and_timeout():

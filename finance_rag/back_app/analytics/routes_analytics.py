@@ -34,7 +34,7 @@ def _sanitize_days(days: int) -> int:
     Returns:
         An integer in the inclusive range [0, 3650].
         Falls back to 7 if input is invalid or cannot be cast to int.
-    """    
+    """
     try:
         d = int(days)
     except Exception:

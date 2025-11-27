@@ -7,7 +7,9 @@ DEFAULT_INDICATOR = "FP.CPI.TOTL.ZG"  # Inflation, consumer prices (annual %)
 WORLD_BANK_BASE = os.getenv("WORLD_BANK_API", "https://api.worldbank.org/v2")
 
 
-async def _fetch_indicator(country: str, indicator: str, latest_only: bool = True) -> List[Dict]:
+async def _fetch_indicator(
+    country: str, indicator: str, latest_only: bool = True
+) -> List[Dict]:
     params = {
         "format": "json",
         "per_page": 500,
@@ -26,19 +28,23 @@ async def _fetch_indicator(country: str, indicator: str, latest_only: bool = Tru
             val = row.get("value")
             if val is None:
                 continue
-            rows.append({
-                "year": yr,
-                "value": float(val),
-                "indicator": indicator,
-                "country": country.upper(),
-            })
+            rows.append(
+                {
+                    "year": yr,
+                    "value": float(val),
+                    "indicator": indicator,
+                    "country": country.upper(),
+                }
+            )
         rows.sort(key=lambda r: r["year"], reverse=True)
         if latest_only and rows:
             return rows[:1]
         return rows
 
 
-async def get_indicator(country: str, indicator: str = DEFAULT_INDICATOR, latest_only: bool = True) -> Dict:
+async def get_indicator(
+    country: str, indicator: str = DEFAULT_INDICATOR, latest_only: bool = True
+) -> Dict:
     """
     Fetch a World Bank indicator (default: CPI inflation) for a country code.
 
@@ -51,10 +57,15 @@ async def get_indicator(country: str, indicator: str = DEFAULT_INDICATOR, latest
         dict with 'rows' list; includes error on failure.
     """
     if not country or not country.strip():
-        return {"error": "country_missing", "detail": "Provide ISO2/ISO3 country code (e.g., CA or CAN)."}
+        return {
+            "error": "country_missing",
+            "detail": "Provide ISO2/ISO3 country code (e.g., CA or CAN).",
+        }
     indicator = indicator.strip() or DEFAULT_INDICATOR
     try:
-        rows = await _fetch_indicator(country.strip(), indicator, latest_only=latest_only)
+        rows = await _fetch_indicator(
+            country.strip(), indicator, latest_only=latest_only
+        )
         return {"ok": True, "rows": rows}
     except Exception as e:
         return {"error": "world_bank_error", "detail": str(e)}

@@ -156,11 +156,15 @@ class _RedisTokenBucket:
     return 1
     """
 
-    def __init__(self, url: str, rate_per_sec: float, burst: float, namespace: str = "rate") -> None:
+    def __init__(
+        self, url: str, rate_per_sec: float, burst: float, namespace: str = "rate"
+    ) -> None:
         try:
             import redis  # type: ignore
         except ImportError as e:
-            raise RuntimeError("Redis is not installed; install 'redis' package to use _RedisTokenBucket.") from e
+            raise RuntimeError(
+                "Redis is not installed; install 'redis' package to use _RedisTokenBucket."
+            ) from e
 
         self.rate: float = max(rate_per_sec, 0.1)
         self.burst: float = max(burst, 1.0)
@@ -182,7 +186,9 @@ class _RedisTokenBucket:
             )
             return bool(int(res))
         except Exception as e:
-            logger.warning("Redis rate-limit error (allowing request by default): %s", e)
+            logger.warning(
+                "Redis rate-limit error (allowing request by default): %s", e
+            )
             return True
 
 

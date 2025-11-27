@@ -13,21 +13,32 @@ import hashlib
 # Load .env if present so required keys are available when running locally
 try:
     from dotenv import load_dotenv  # type: ignore
+
     load_dotenv()
 except Exception:
     pass
 
 # ----------- CONFIG (env-driven) ----------------
-DOCS_DIR = os.getenv("DOCS_DIR", str(Path(__file__).resolve().parents[1] / "data" / "raw"))
+DOCS_DIR = os.getenv(
+    "DOCS_DIR", str(Path(__file__).resolve().parents[1] / "data" / "raw")
+)
 QDRANT_URL = os.environ["QDRANT_URL"]
 QDRANT_API_KEY = os.environ["QDRANT_API_KEY"]
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "finance_docs")
-OVERWRITE_COLLECTION = os.getenv("OVERWRITE_COLLECTION", "0") not in ("0", "false", "False", "no", "No")
+OVERWRITE_COLLECTION = os.getenv("OVERWRITE_COLLECTION", "0") not in (
+    "0",
+    "false",
+    "False",
+    "no",
+    "No",
+)
 
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 # Lightweight keyword extraction model (can be same as chat model)
-OPENAI_KEYWORD_MODEL = os.getenv("OPENAI_KEYWORD_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+OPENAI_KEYWORD_MODEL = os.getenv(
+    "OPENAI_KEYWORD_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+)
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
@@ -35,18 +46,29 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
 BATCH = int(os.getenv("EMBED_BATCH", "16"))
 KEYWORDS_PER_CHUNK = int(os.getenv("RAG_KEYWORDS_PER_CHUNK", "8"))
 # Turn off keyword extraction to speed up ingestion for large corpora (default: off)
-ENABLE_KEYWORDS = os.getenv("ENABLE_KEYWORDS", "0") not in ("0", "false", "False", "no", "No")
+ENABLE_KEYWORDS = os.getenv("ENABLE_KEYWORDS", "0") not in (
+    "0",
+    "false",
+    "False",
+    "no",
+    "No",
+)
 # HTTP timeout (seconds) for Qdrant requests
 QDRANT_TIMEOUT = float(os.getenv("QDRANT_TIMEOUT", "30"))
 # Once a moderation/permission issue is hit, disable further keyword calls to avoid spamming 403s.
 KEYWORDS_AVAILABLE = True
 
+
 def resolve_dims(model: str) -> int:
     m = model.strip().lower()
-    if "text-embedding-3-large" in m: return 3072
-    if "text-embedding-3-small" in m: return 1536
-    if "text-embedding-ada-002" in m: return 1536
+    if "text-embedding-3-large" in m:
+        return 3072
+    if "text-embedding-3-small" in m:
+        return 1536
+    if "text-embedding-ada-002" in m:
+        return 1536
     raise ValueError(f"Unknown embedding dim for model={model}")
+
 
 def prettify_title(path: str) -> str:
     """
@@ -59,12 +81,15 @@ def prettify_title(path: str) -> str:
     stem = stem.replace("’", "'")
     return stem or os.path.basename(path)
 
+
 def chunk_pdf(path: str) -> List[Dict]:
     reader = PdfReader(path)
     pages = [p.extract_text() or "" for p in reader.pages]
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
-        separators=["\n\n", "\n", " ", ""], length_function=len
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", " ", ""],
+        length_function=len,
     )
     chunks: List[Dict] = []
     abspath = os.path.abspath(path)
@@ -74,25 +99,30 @@ def chunk_pdf(path: str) -> List[Dict]:
     for page_idx, txt in enumerate(pages, start=1):
         parts = splitter.split_text(txt)
         for chunk_idx, c in enumerate(parts):
-            chunks.append({
-                "page_content": c,      
-                "metadata": {               
-                    "source": abspath,
-                    "title": title,
-                    "url": url,
-                    "page": page_idx,
-                    "chunk": chunk_idx,
-                    "source_file": filename,
+            chunks.append(
+                {
+                    "page_content": c,
+                    "metadata": {
+                        "source": abspath,
+                        "title": title,
+                        "url": url,
+                        "page": page_idx,
+                        "chunk": chunk_idx,
+                        "source_file": filename,
+                    },
                 }
-            })
+            )
     return chunks
+
 
 def embed_texts(oai: OpenAI, texts: List[str]) -> List[List[float]]:
     res = oai.embeddings.create(model=OPENAI_EMBEDDING_MODEL, input=texts)
     return [d.embedding for d in res.data]
 
 
-def extract_keywords(oai: OpenAI, text: str, *, max_keywords: int = KEYWORDS_PER_CHUNK) -> List[str]:
+def extract_keywords(
+    oai: OpenAI, text: str, *, max_keywords: int = KEYWORDS_PER_CHUNK
+) -> List[str]:
     """
     Use an LLM to extract a small set of finance-relevant keywords for a chunk.
 
@@ -110,14 +140,17 @@ def extract_keywords(oai: OpenAI, text: str, *, max_keywords: int = KEYWORDS_PER
         "from the following text. Focus on investing, markets, instruments, or "
         "personal finance concepts. Respond with a comma-separated list only, "
         "no explanations.\n\n"
-        "Text:\n\"\"\"\n{body}\n\"\"\""
+        'Text:\n"""\n{body}\n"""'
     ).format(k=max_keywords, body=txt[:1200])
 
     try:
         resp = oai.chat.completions.create(
             model=OPENAI_KEYWORD_MODEL,
             messages=[
-                {"role": "system", "content": "You are a financial domain keyword extractor."},
+                {
+                    "role": "system",
+                    "content": "You are a financial domain keyword extractor.",
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.0,
@@ -145,13 +178,15 @@ def extract_keywords(oai: OpenAI, text: str, *, max_keywords: int = KEYWORDS_PER
             break
     return out
 
+
 def stable_uuid(md: dict, text: str) -> str:
-    src  = str((md or {}).get("source", ""))
+    src = str((md or {}).get("source", ""))
     page = str((md or {}).get("page", ""))
-    chk  = str((md or {}).get("chunk", ""))
+    chk = str((md or {}).get("chunk", ""))
     head = (text or "")[:80]
-    key  = f"{src}|{page}|{chk}|{head}"
+    key = f"{src}|{page}|{chk}|{head}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
 
 def main():
     dims = resolve_dims(OPENAI_EMBEDDING_MODEL)
@@ -159,7 +194,8 @@ def main():
     print(f"📂 DOCS_DIR={DOCS_DIR}")
 
     files = sorted(
-        f for f in glob.glob(os.path.join(DOCS_DIR, "**/*.pdf"), recursive=True)
+        f
+        for f in glob.glob(os.path.join(DOCS_DIR, "**/*.pdf"), recursive=True)
         if os.path.isfile(f)
     )
     if not files:
@@ -171,10 +207,18 @@ def main():
         print(f"✅ Collection exists: {QDRANT_COLLECTION}")
         try:
             info = qd.get_collection(QDRANT_COLLECTION)
-            vecs = getattr(info.config.params, "vectors", None) if hasattr(info, "config") else None
+            vecs = (
+                getattr(info.config.params, "vectors", None)
+                if hasattr(info, "config")
+                else None
+            )
             size = None
             if vecs is None:
-                vecs = info.get("config", {}).get("params", {}).get("vectors", {}) if isinstance(info, dict) else None
+                vecs = (
+                    info.get("config", {}).get("params", {}).get("vectors", {})
+                    if isinstance(info, dict)
+                    else None
+                )
             if isinstance(vecs, dict):
                 size = vecs.get("size")
             elif vecs is not None:
@@ -185,14 +229,20 @@ def main():
                     "Either set OPENAI_EMBEDDING_MODEL back to the original size, or drop/recreate the collection."
                 )
                 if OVERWRITE_COLLECTION:
-                    print(f"⚠️ {msg} Recreating collection due to OVERWRITE_COLLECTION=1 ...")
+                    print(
+                        f"⚠️ {msg} Recreating collection due to OVERWRITE_COLLECTION=1 ..."
+                    )
                     qd.delete_collection(QDRANT_COLLECTION)
                     qd.create_collection(
                         collection_name=QDRANT_COLLECTION,
-                        vectors_config=VectorParams(size=dims, distance=Distance.COSINE),
+                        vectors_config=VectorParams(
+                            size=dims, distance=Distance.COSINE
+                        ),
                     )
                 else:
-                    raise SystemExit(f"ERROR: {msg} Set OVERWRITE_COLLECTION=1 to recreate.")
+                    raise SystemExit(
+                        f"ERROR: {msg} Set OVERWRITE_COLLECTION=1 to recreate."
+                    )
         except SystemExit:
             raise
         except Exception as e:
@@ -212,19 +262,27 @@ def main():
         print(f"• {os.path.basename(path)} → {len(chunks)} chunks")
         total += len(chunks)
         for i in range(0, len(chunks), BATCH):
-            batch = chunks[i:i+BATCH]
+            batch = chunks[i : i + BATCH]
             texts = [b["page_content"] for b in batch]
             vecs = embed_texts(oai, texts)
             points = []
             for j in range(len(batch)):
-                pc = batch[j]["page_content"] if "page_content" in batch[j] else batch[j]["text"]
-                md = batch[j]["metadata"] if "metadata" in batch[j] else {
-                    "source": batch[j].get("source"),
-                    "title":  batch[j].get("title"),
-                    "url":    batch[j].get("url"),
-                    "page":   batch[j].get("page"),
-                    "chunk":  j,
-                }
+                pc = (
+                    batch[j]["page_content"]
+                    if "page_content" in batch[j]
+                    else batch[j]["text"]
+                )
+                md = (
+                    batch[j]["metadata"]
+                    if "metadata" in batch[j]
+                    else {
+                        "source": batch[j].get("source"),
+                        "title": batch[j].get("title"),
+                        "url": batch[j].get("url"),
+                        "page": batch[j].get("page"),
+                        "chunk": j,
+                    }
+                )
                 # Enrich metadata with LLM-extracted keywords for better retrieval filtering.
                 kws = []
                 if ENABLE_KEYWORDS:
@@ -236,12 +294,12 @@ def main():
                     md = {**md, "keywords": kws}
                 points.append(
                     PointStruct(
-                        id=stable_uuid(md, pc), 
+                        id=stable_uuid(md, pc),
                         vector=vecs[j],
                         payload={
                             "page_content": pc,
                             "metadata": md,
-                        }
+                        },
                     )
                 )
 
@@ -253,8 +311,10 @@ def main():
         count = None
     print(f"✅ Done. Upserted {total} chunks into '{QDRANT_COLLECTION}'. Count≈{count}")
 
+
 if __name__ == "__main__":
     for k in ("OPENAI_API_KEY", "QDRANT_URL", "QDRANT_API_KEY"):
         if not os.getenv(k):
-            print(f"Missing env: {k}", file=sys.stderr); sys.exit(2)
+            print(f"Missing env: {k}", file=sys.stderr)
+            sys.exit(2)
     main()

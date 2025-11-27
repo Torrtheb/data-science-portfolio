@@ -6,7 +6,6 @@ from typing import Any, List, Optional
 import unicodedata
 
 
-
 # ---- Regexes for URL & LaTeX forms ------------------------------------------
 HREF_RE = re.compile(r"\\href\{([^}]+)\}\{([^}]+)\}")
 URL_CMD_RE = re.compile(r"\\url\{([^}]+)\}")
@@ -17,37 +16,41 @@ DOLLAR_URL_RE = re.compile(r"\$(https?://[^$]+)\$")
 BARE_URL_RE = re.compile(r"(?<!\]\()(?P<u>https?://[^\s)]+)")
 BARE_URL2_RE = re.compile(r"(?<!\]\()(?P<url>https?://[^\s)]+)")
 _ESCAPED_BRACKETS = re.compile(r"\\\[\s*([\s\S]*?)\s*\\\]")
-_ESCAPED_PARENS   = re.compile(r"\\\(\s*([\s\S]*?)\s*\\\)")
+_ESCAPED_PARENS = re.compile(r"\\\(\s*([\s\S]*?)\s*\\\)")
 
 
 # ---- Unicode spaces & invisibles -------------------------------------------
 
 _UWS_CHARS = (
-    "\u00A0"                                 # NBSP
+    "\u00a0"  # NBSP
     "\u2000\u2001\u2002\u2003\u2004\u2005"
-    "\u2006\u2007\u2008\u2009\u200A"         # EN/EM/THIN/HAIR/etc
-    "\u202F"                                 # NARROW NBSP
-    "\u205F"                                 # MMSP
-    "\u3000"                                 # IDEOGRAPHIC SPACE
-    "\u200B\u200C\u200D\u2060"               # ZWSP/ZWNJ/ZWJ/WORD JOINER
+    "\u2006\u2007\u2008\u2009\u200a"  # EN/EM/THIN/HAIR/etc
+    "\u202f"  # NARROW NBSP
+    "\u205f"  # MMSP
+    "\u3000"  # IDEOGRAPHIC SPACE
+    "\u200b\u200c\u200d\u2060"  # ZWSP/ZWNJ/ZWJ/WORD JOINER
 )
 _UWS_CLASS = f"[{_UWS_CHARS}]"
 _WS_OR_UWS = rf"(?:\s|{_UWS_CLASS})"
-SUMMARY_BLOCK_RE = re.compile(
-    r"(?ims)^\s*summary:\s*\n(?:(?!^\s*$).*\n)*"
-)
+SUMMARY_BLOCK_RE = re.compile(r"(?ims)^\s*summary:\s*\n(?:(?!^\s*$).*\n)*")
 
 # -- Math detection & currency heuristic --------------------------------------
 _INLINE_MATH_NO_CURRENCY = rf"(?<!\\)\$(?!{_WS_OR_UWS}*[+\-]?\d)[\s\S]+?(?<!\\)\$"
-_MATH_ANY_RE = re.compile(rf"(?:\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|{_INLINE_MATH_NO_CURRENCY}|\\\([\s\S]*?\\\))")
-INLINE_OR_DISPLAY_MATH_RE = re.compile(r"(?:\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))")
+_MATH_ANY_RE = re.compile(
+    rf"(?:\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|{_INLINE_MATH_NO_CURRENCY}|\\\([\s\S]*?\\\))"
+)
+INLINE_OR_DISPLAY_MATH_RE = re.compile(
+    r"(?:\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))"
+)
 _CURRENCY_RE = re.compile(rf"(?<!\\)\$({_WS_OR_UWS}*[+\-]?\d[\d,]*(?:\.\d+)?)")
 
 # -- Healing for zero-width characters after backslashes ----------------------
 _ZW_AFTER_BACKSLASH_RE = re.compile(r"\\[\u200B\u200C\u200D\u2060]+([()\[\]])")
 
 # -- URL sanitation ------------------------------------------------------------
-_BAD_URL_CHARS_RE = re.compile(r"[\s\u00A0\u202F\u00AD\u200B-\u200F\u2060-\u206F\uFEFF\u2028\u2029]")
+_BAD_URL_CHARS_RE = re.compile(
+    r"[\s\u00A0\u202F\u00AD\u200B-\u200F\u2060-\u206F\uFEFF\u2028\u2029]"
+)
 _WHITELIST_URL_RE = re.compile(r"[^A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]")
 NEWS_LINKS = os.getenv("NEWS_LINKS", "1") != "0"
 _LINK_URL_RE = re.compile(r"\]\(\s*([^)]+?)\s*\)")
@@ -56,6 +59,7 @@ _LINK_URL_RE = re.compile(r"\]\(\s*([^)]+?)\s*\)")
 # ---------------------------------
 # URL sanitation & normalization
 # ---------------------------------
+
 
 def _url_sanitize_strict(u: Optional[str]) -> str:
     """
@@ -81,6 +85,7 @@ def _url_sanitize_strict(u: Optional[str]) -> str:
     if s.startswith("www."):
         s = "https://" + s
     return s
+
 
 def _unsplit_link_urls(md: str) -> str:
     """
@@ -145,17 +150,24 @@ def _normalize_links(text: str) -> str:
     if not text:
         return text
     s = text
+
     def _unescape_if_non_math(body: str, brackets: bool) -> str:
         return f"[{body}]" if brackets else f"({body})"
 
     s = _ESCAPED_BRACKETS.sub(
-        lambda m: _unescape_if_non_math(m.group(1), brackets=True)
-        if _looks_non_math_text(m.group(1)) else m.group(0),
+        lambda m: (
+            _unescape_if_non_math(m.group(1), brackets=True)
+            if _looks_non_math_text(m.group(1))
+            else m.group(0)
+        ),
         s,
     )
     s = _ESCAPED_PARENS.sub(
-        lambda m: _unescape_if_non_math(m.group(1), brackets=False)
-        if _looks_non_math_text(m.group(1)) else m.group(0),
+        lambda m: (
+            _unescape_if_non_math(m.group(1), brackets=False)
+            if _looks_non_math_text(m.group(1))
+            else m.group(0)
+        ),
         s,
     )
 
@@ -169,7 +181,7 @@ def _normalize_links(text: str) -> str:
     chunks: List[str] = []
     last = 0
     for m in _MATH_ANY_RE.finditer(s):
-        before = s[last:m.start()]
+        before = s[last : m.start()]
         before = BARE_URL2_RE.sub(_wrap_sanitized, before)
         chunks.append(before)
         chunks.append(m.group(0))
@@ -458,7 +470,7 @@ def _break_currency_pairs(md: str) -> str:
         prose = parts[i]
         chunks = re.split(r"(\n\s*\n)", prose)
 
-        for j in range(0, len(chunks), 2): 
+        for j in range(0, len(chunks), 2):
             para = chunks[j]
             if not para.strip():
                 continue
@@ -470,14 +482,14 @@ def _break_currency_pairs(md: str) -> str:
             out = []
             cursor = 0
             for k, m in enumerate(matches):
-                out.append(para[cursor:m.start()])
+                out.append(para[cursor : m.start()])
                 amt = m.group(1)
                 amt = re.sub(rf"^{_WS_OR_UWS}*", "", amt)
 
                 if k < len(matches) - 1:
                     out.append(f"USD {amt}")
                 else:
-                    out.append(para[m.start():m.end()])
+                    out.append(para[m.start() : m.end()])
                 cursor = m.end()
             out.append(para[cursor:])
             chunks[j] = "".join(out)
@@ -506,8 +518,9 @@ def _normalize_inline_math_whitespace(block: str) -> str:
     if not block or len(block) < 2:
         return block
 
-    if (block.startswith("$$") and block.endswith("$$")) or \
-       (block.startswith("\\[") and block.endswith("\\]")):
+    if (block.startswith("$$") and block.endswith("$$")) or (
+        block.startswith("\\[") and block.endswith("\\]")
+    ):
         inner = block[2:-2] if block.startswith("\\[") else block[2:-2]
         inner = re.sub(r"\s+", " ", inner).strip()
         inner = re.sub(r"(?<!\\)%", r"\\%", inner)
@@ -519,7 +532,6 @@ def _normalize_inline_math_whitespace(block: str) -> str:
         return f"\\({inner}\\)"
 
     return block
-
 
 
 def _escape_dollars_outside_math_and_code(md: str) -> str:
@@ -588,7 +600,6 @@ def _looks_non_math_text(s: str) -> bool:
     has_ops = re.search(r"[=^_{}]", body) is not None
     word_count = len(re.findall(r"\b[\w’']+\b", body))
     return (word_count >= 5) and (not has_cmd) and (not has_ops)
-
 
 
 def _postprocess_markdown(s: str) -> str:
@@ -671,9 +682,13 @@ def _postprocess_markdown(s: str) -> str:
         seg = re.sub(r"\]\s+\(", "](", seg)
         parts[i] = seg
 
-    HEADING_OR_STEP_RX = re.compile(r"([^\n])\s+((?:#{1,6}\s+)|(?:\d{1,3}[.)]\s+)|(?:[-*]\s+))")
+    HEADING_OR_STEP_RX = re.compile(
+        r"([^\n])\s+((?:#{1,6}\s+)|(?:\d{1,3}[.)]\s+)|(?:[-*]\s+))"
+    )
 
-    STRUCTURE_LINE_RX = re.compile(r"^(#{1,6}\s+|[-*+]\s+|\d{1,3}[.)]\s+|>\s+|\|\s)", re.M)
+    STRUCTURE_LINE_RX = re.compile(
+        r"^(#{1,6}\s+|[-*+]\s+|\d{1,3}[.)]\s+|>\s+|\|\s)", re.M
+    )
 
     for i in range(0, len(parts), 2):
         seg = parts[i]
@@ -689,7 +704,12 @@ def _postprocess_markdown(s: str) -> str:
             if STRUCTURE_LINE_RX.match(ln):
                 out.append(ln.rstrip())
                 continue
-            if out and out[-1] and not STRUCTURE_LINE_RX.match(out[-1]) and out[-1].strip():
+            if (
+                out
+                and out[-1]
+                and not STRUCTURE_LINE_RX.match(out[-1])
+                and out[-1].strip()
+            ):
                 out[-1] = out[-1].rstrip() + " " + ln.strip()
             else:
                 out.append(ln.strip())
@@ -708,5 +728,3 @@ def _postprocess_markdown(s: str) -> str:
     s = _normalize_links(s)
     s = _unsplit_link_urls(s)
     return s
-
-

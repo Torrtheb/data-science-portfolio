@@ -302,7 +302,13 @@ def normalize_source(item: str | dict | Any) -> dict[str, Any]:
                 except Exception:
                     p = page
                 display = f"{display} | Page {p}"
-            return {"type": "web", "display": display, "href": None, "title": title, "page": page}
+            return {
+                "type": "web",
+                "display": display,
+                "href": None,
+                "title": title,
+                "page": page,
+            }
         return {"type": "web", "display": str(item), "href": None}
 
     return {"type": "web", "display": str(item), "href": None}

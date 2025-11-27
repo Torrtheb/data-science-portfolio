@@ -242,8 +242,7 @@ _FINANCE_KEYWORDS_RX = re.compile(
 )
 
 _CURRENCY_RX = re.compile(
-    r"([$€£¥]|"
-    r"\b(usd|eur|gbp|cad|aud|chf|jpy)\b)",
+    r"([$€£¥]|" r"\b(usd|eur|gbp|cad|aud|chf|jpy)\b)",
     re.I,
 )
 
@@ -296,7 +295,9 @@ def _looks_toolable(q: str) -> bool:
     s = q.strip()
     if TICKER_RX.search(s):
         return True
-    price_like = re.search(r"\b(price|quote|candles?|chart|news|profile|market price)\b", s, re.I)
+    price_like = re.search(
+        r"\b(price|quote|candles?|chart|news|profile|market price)\b", s, re.I
+    )
     if price_like:
         # price/quote-like queries should be toolable even if the finance classifier misses
         return True

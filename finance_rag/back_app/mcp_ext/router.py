@@ -319,7 +319,6 @@ async def worldbank_value(body: WorldBankValueArgs):
     return out
 
 
-
 @router.get("/tools/list")
 async def tools_list(server_key: str = "world_bank"):
     """
@@ -332,6 +331,7 @@ async def tools_list(server_key: str = "world_bank"):
         Output from 'get_tools'.
     """
     return await get_tools(server_key)
+
 
 @router.post("/tools/call")
 async def tools_call(payload: dict):
@@ -357,6 +357,7 @@ async def tools_call(payload: dict):
 
     if not tool:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=400, detail="Missing 'tool'/'name'.")
 
     try:
@@ -368,5 +369,6 @@ async def tools_call(payload: dict):
         )
     except ValidationError as e:
         from fastapi import HTTPException
+
         raise HTTPException(status_code=400, detail=str(e))
     return await call_tool(body)

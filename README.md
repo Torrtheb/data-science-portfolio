@@ -1,6 +1,6 @@
 # Data Science & AI Engineering Portfolio
 
-Hi, I’m **Elizabeth Torrance** — a bilingual (EN/FR) data scientist and AI engineer who ships full-stack ML/AI products. I work end-to-end with an emphasis on explainability, reliability, and real users.
+Hi, I’m **Elizabeth Torrance**, a bilingual (EN/FR) data scientist and AI engineer who ships full-stack ML/AI products. I work end-to-end with an emphasis on explainability, reliability, and real users.
 
 - 3 deployed apps: AI scheduling assistant, finance RAG chatbot, credit-risk evaluation.
 - Comfortable across Python/SQL, FastAPI/Next.js, LangChain/LangGraph, PyTorch/sklearn, Docker/Cloud Run.

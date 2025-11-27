@@ -8,7 +8,6 @@ import time as real_time
 import back_app.llm.tools as tools
 
 
-
 class FixedDate(dt.date):
     @classmethod
     def today(cls) -> "FixedDate":
@@ -37,7 +36,7 @@ async def test_get_company_news_basic(monkeypatch):
             },
             {
                 "headline": "Apple launches new product",  # duplicate headline
-                "url": "https://example.com/aapl1",        # duplicate url
+                "url": "https://example.com/aapl1",  # duplicate url
                 "source": "ExampleNews",
                 "datetime": 1700000001,
             },
@@ -83,8 +82,18 @@ async def test_get_company_news_cache_ttl(monkeypatch):
     async def fake_fh_get(path, params):
         calls["count"] += 1
         return [
-            {"headline": "Item 1", "url": "https://example.com/1", "source": "X", "datetime": 1},
-            {"headline": "Item 2", "url": "https://example.com/2", "source": "Y", "datetime": 2},
+            {
+                "headline": "Item 1",
+                "url": "https://example.com/1",
+                "source": "X",
+                "datetime": 1,
+            },
+            {
+                "headline": "Item 2",
+                "url": "https://example.com/2",
+                "source": "Y",
+                "datetime": 2,
+            },
         ]
 
     tools._NEWS_CACHE.clear()
@@ -93,7 +102,6 @@ async def test_get_company_news_cache_ttl(monkeypatch):
     monkeypatch.setattr(tools, "date", FixedDate, raising=False)
     # Patch the module’s `time` reference (get_company_news reads `time.time()` from module namespace)
     monkeypatch.setattr(real_time, "time", fake_time, raising=True)
-
 
     # First call — hits upstream
     out1 = await tools.get_company_news("MSFT", days=7, limit=10)

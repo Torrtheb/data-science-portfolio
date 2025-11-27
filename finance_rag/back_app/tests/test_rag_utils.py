@@ -70,7 +70,6 @@ def test_handles_missing_metadata_and_none():
     assert out == []
 
 
-
 def test_non_numeric_metadata_ignored():
     doc = make_doc(dense_relevance="not-a-number", bm25_score="oops")
     # Should not raise, and doc should be filtered out

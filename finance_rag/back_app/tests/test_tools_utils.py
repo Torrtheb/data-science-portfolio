@@ -108,8 +108,16 @@ def test_collect_tool_markdown_basic(monkeypatch):
     # Patch helpers inside the module under test to make output deterministic
     monkeypatch.setattr(tools_utils, "_clean_title", lambda s: s.strip())
     monkeypatch.setattr(tools_utils, "_prettify_provider", lambda s: s.strip().title())
-    monkeypatch.setattr(tools_utils, "_to_iso_day", lambda x: "2025-01-02" if x == "t1" else "2025-01-01")
-    monkeypatch.setattr(tools_utils, "_pretty_date", lambda x: {"2025-01-02": "Jan 2, 2025", "2025-01-01": "Jan 1, 2025"}.get(x, ""))
+    monkeypatch.setattr(
+        tools_utils,
+        "_to_iso_day",
+        lambda x: "2025-01-02" if x == "t1" else "2025-01-01",
+    )
+    monkeypatch.setattr(
+        tools_utils,
+        "_pretty_date",
+        lambda x: {"2025-01-02": "Jan 2, 2025", "2025-01-01": "Jan 1, 2025"}.get(x, ""),
+    )
 
     steps = [
         (
@@ -117,8 +125,16 @@ def test_collect_tool_markdown_basic(monkeypatch):
             json.dumps(
                 {
                     "news": [
-                        {"headline": "Apple hits record", "source": "reuters", "datetime": "t2"},
-                        {"title": "NVIDIA unveils new GPU", "source": "the verge", "datetime": "t1"},
+                        {
+                            "headline": "Apple hits record",
+                            "source": "reuters",
+                            "datetime": "t2",
+                        },
+                        {
+                            "title": "NVIDIA unveils new GPU",
+                            "source": "the verge",
+                            "datetime": "t1",
+                        },
                     ]
                 }
             ),
@@ -159,14 +175,15 @@ def test_looks_toolable(q, expected):
 # _is_finance_query
 # -----------------------------
 
+
 @pytest.mark.parametrize(
     "q,expected",
     [
-        ("What's AAPL price today?", True),              # ticker
-        ("How do I invest in ETFs?", True),              # investing keyword
+        ("What's AAPL price today?", True),  # ticker
+        ("How do I invest in ETFs?", True),  # investing keyword
         ("Should I increase my 401k contributions?", True),  # retirement / 401k
-        ("Explain compound interest and inflation", True),   # core finance concepts
-        ("What is GDP growth for Canada?", True),            # macro keyword
+        ("Explain compound interest and inflation", True),  # core finance concepts
+        ("What is GDP growth for Canada?", True),  # macro keyword
         ("Tell me a joke about cats", False),
         ("Explain photosynthesis", False),
         ("How to cook pasta?", False),
@@ -183,7 +200,10 @@ def test_is_finance_query(q, expected):
 def test_extract_tool_events_various():
     steps = [
         (SimpleNamespace(tool="get_company_news"), {"ok": True, "elapsed_ms": 123}),
-        {"action": {"tool": "get_price"}, "observation": json.dumps({"error": "rate limited"})},
+        {
+            "action": {"tool": "get_price"},
+            "observation": json.dumps({"error": "rate limited"}),
+        },
         (SimpleNamespace(tool="screen_equities"), "plain text"),
     ]
 

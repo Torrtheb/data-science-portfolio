@@ -19,11 +19,9 @@ from back_app.utils.symbols import canonize_symbol
         ("HEI A", "HEI.A"),
         ("HEI/A", "HEI.A"),
         ("HEI-A", "HEI.A"),
-
         # 2) Strip leading '$'
         ("$AAPL", "AAPL"),
         ("$msft", "MSFT"),
-
         # 3) Region/exchange hints → standard suffixes
         ("SHOP.TSX", "SHOP.TO"),
         ("SHOP:CA", "SHOP.TO"),
@@ -33,21 +31,17 @@ from back_app.utils.symbols import canonize_symbol
         ("BP:GB", "BP.L"),
         ("BHP:AU", "BHP.AX"),
         ("0700:HK", "0700.HK"),
-
         # 4) Remove explicit 'US' qualifiers
         ("AAPL.US", "AAPL"),
         ("MSFT:US", "MSFT"),
         ("GOOG..US", "GOOG"),  # also tests dot collapsing below
-
         # 5) Collapse multiple dots
         ("AAPL..TO", "AAPL.TO"),
         ("X...TO", "X.TO"),
-
         # 6) Class-shares of known roots written with dash/space (fallback regex)
-        ("BRK C", "BRK.C"),     # not a real class, but tests the logic path
+        ("BRK C", "BRK.C"),  # not a real class, but tests the logic path
         ("BF-C", "BF.C"),
-        ("HEI/A", "HEI.A"),     # already covered by alias but fine
-
+        ("HEI/A", "HEI.A"),  # already covered by alias but fine
         # 7) Idempotence for already canonical forms
         ("AAPL", "AAPL"),
         ("MSFT", "MSFT"),
@@ -56,11 +50,9 @@ from back_app.utils.symbols import canonize_symbol
         ("BP.L", "BP.L"),
         ("BHP.AX", "BHP.AX"),
         ("0700.HK", "0700.HK"),
-
         # 8) Trimming / case-normalization
         ("  msft  ", "MSFT"),
         ("\tBrK b\n", "BRK.B"),
-
         # 9) Falsy / empty
         ("", ""),
     ],

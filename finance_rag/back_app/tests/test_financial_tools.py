@@ -15,7 +15,7 @@ try:
         calculate_loan_amortization,
         npv,
         cagr,
-        _normalize_freq_key,          # internal but useful to sanity-check
+        _normalize_freq_key,  # internal but useful to sanity-check
         _validate_and_get_frequency,  # internal but useful to sanity-check
         FREQUENCY_MAP,
     )
@@ -45,15 +45,21 @@ def test_calculate_simple_interest_basic():
 
 
 def test_calculate_simple_interest_with_inflation():
-    out = calculate_simple_interest(principal=1000, rate_percent=5, years=2, inflation_rate_percent=2)
+    out = calculate_simple_interest(
+        principal=1000, rate_percent=5, years=2, inflation_rate_percent=2
+    )
     assert out["total_amount"] == 1100
     # Real value discounted by inflation
-    assert out["real_value"] == pytest.approx(1100 / (1.02 ** 2), rel=1e-9)
-    assert out["purchasing_power_loss"] == pytest.approx(1100 - out["real_value"], rel=1e-9)
+    assert out["real_value"] == pytest.approx(1100 / (1.02**2), rel=1e-9)
+    assert out["purchasing_power_loss"] == pytest.approx(
+        1100 - out["real_value"], rel=1e-9
+    )
 
 
 def test_calculate_compound_interest_monthly():
-    out = calculate_compound_interest(principal=2000, rate_percent=6, years=3, compounding_per_year=12)
+    out = calculate_compound_interest(
+        principal=2000, rate_percent=6, years=3, compounding_per_year=12
+    )
     # Expected total using monthly compounding: P * (1 + r/m)^(m*t)
     expected_total = 2000 * ((1 + 0.06 / 12) ** (12 * 3))
     assert out["total_amount"] == pytest.approx(expected_total, rel=1e-12)
@@ -114,7 +120,10 @@ def test_normalize_and_validate_frequency():
     assert _normalize_freq_key("Monthly") == "monthly"
     # validate returns numbers
     assert _validate_and_get_frequency("monthly", "field") == FREQUENCY_MAP["monthly"]
-    assert _validate_and_get_frequency("semi-annual", "field") == FREQUENCY_MAP["semiannually"]
+    assert (
+        _validate_and_get_frequency("semi-annual", "field")
+        == FREQUENCY_MAP["semiannually"]
+    )
     with pytest.raises(ValueError):
         _validate_and_get_frequency("every-so-often", "field")
 
@@ -148,7 +157,7 @@ def test_npv_basic():
     # Simple cashflows: at t=0: -1000, t=1: +600, t=2: +600; discount 10% per period
     value = npv(10.0, [Decimal("-1000"), Decimal("600"), Decimal("600")])
     # Manual: -1000 + 600/1.1 + 600/(1.1^2)
-    expected = (-1000) + (600 / 1.1) + (600 / (1.1 ** 2))
+    expected = (-1000) + (600 / 1.1) + (600 / (1.1**2))
     # Rounded to cents inside npv
     assert float(value) == pytest.approx(round(expected, 2), abs=1e-2)
 

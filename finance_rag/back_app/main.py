@@ -14,7 +14,13 @@ import httpx
 from loguru import logger
 from sqlalchemy.orm import Session as SASession
 from fastapi import (
-    FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect, Response
+    FastAPI,
+    HTTPException,
+    Request,
+    Depends,
+    WebSocket,
+    WebSocketDisconnect,
+    Response,
 )
 from fastapi.responses import JSONResponse, StreamingResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +28,13 @@ from langchain_openai import ChatOpenAI
 from langchain_core.callbacks import AsyncCallbackHandler
 
 from .core.db import (
-    get_db, init_db, get_or_create_session, list_messages, append_message, touch_session, engine
+    get_db,
+    init_db,
+    get_or_create_session,
+    list_messages,
+    append_message,
+    touch_session,
+    engine,
 )
 
 from .llm.agent_tools import TOOLS
@@ -80,6 +92,8 @@ from openai import OpenAI
 
 # ----------- GLOBAL VARIABLES -----------
 APP_NAME: str = os.getenv("APP_NAME", "finance-chatbot-api")
+
+
 def _compute_allowed_origins() -> list[str]:
     """
     Build a strict CORS allowlist from configured origins.
@@ -103,21 +117,25 @@ ALLOWED_ORIGINS = _compute_allowed_origins()
 MAX_REQUEST_TOKENS: int = int(os.getenv("MAX_REQUEST_TOKENS", "8192"))
 RATE_LIMIT_RPS: float = settings.rate_limit_rps
 RATE_LIMIT_BURST: float = float(os.getenv("RATE_LIMIT_BURST", "10"))
-retriever = None              
-make_answer_prompt_fn = None  
-rag_agent_chain = None 
-rag_agent_chain_stream = None 
-llm = None 
+retriever = None
+make_answer_prompt_fn = None
+rag_agent_chain = None
+rag_agent_chain_stream = None
+llm = None
 
 MIN_SCORE: float = float(getattr(settings, "rag_min_score", 0.25))
 MIN_DOCS: int = 1
 
-SAFE = re.compile(r'^[a-zA-Z0-9_-]+$')
-OPENAI_SAFE = re.compile(r'^[a-zA-Z0-9_-]+$')
+SAFE = re.compile(r"^[a-zA-Z0-9_-]+$")
+OPENAI_SAFE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 STOCK_TOOL_NAMES: set[str] = {
-    "get_live_price", "search_symbol", "get_company_profile", "get_candles",
-    "get_recommendation_trends", "get_company_news",
+    "get_live_price",
+    "search_symbol",
+    "get_company_profile",
+    "get_candles",
+    "get_recommendation_trends",
+    "get_company_news",
 }
 
 FINNHUB_SOURCE: dict[str, str] = {
@@ -140,11 +158,12 @@ WORLD_BANK_SOURCE: dict[str, str] = {
     "url": "https://data.worldbank.org/",
 }
 
-SESSION_TOKEN_REQUIRED: bool = (
-    settings.session_token_required or bool(settings.session_token_secret)
+SESSION_TOKEN_REQUIRED: bool = settings.session_token_required or bool(
+    settings.session_token_secret
 )
 ADMIN_ROUTES_ENABLED: bool = bool(os.getenv("ADMIN_KEY"))
 _moderation_client = None
+
 
 # ----------- SETUP HELPERS ------------
 def _build_rate_limiter():
@@ -156,9 +175,14 @@ def _build_rate_limiter():
     if redis_url:
         try:
             logger.info("Using Redis rate limiter at %s (ns=%s)", redis_url, ns)
-            return _RedisTokenBucket(redis_url, RATE_LIMIT_RPS, RATE_LIMIT_BURST, namespace=ns)
+            return _RedisTokenBucket(
+                redis_url, RATE_LIMIT_RPS, RATE_LIMIT_BURST, namespace=ns
+            )
         except Exception as e:
-            logger.warning("Redis rate limiter unavailable (%s); falling back to in-memory bucket.", e)
+            logger.warning(
+                "Redis rate limiter unavailable (%s); falling back to in-memory bucket.",
+                e,
+            )
     return _TokenBucket(RATE_LIMIT_RPS, RATE_LIMIT_BURST)
 
 
@@ -215,6 +239,7 @@ def _get_retriever_lazy(force_rebuild: bool = False):
     if retriever is None or force_rebuild:
         try:
             from .llm.rag import get_retriever as _gr
+
             retriever = _gr(force_rebuild=force_rebuild)
         except Exception as e:
             logger.warning("Retriever unavailable: {}", e)
@@ -290,7 +315,9 @@ def _moderate_text(text: str) -> Optional[dict]:
     try:
         global _moderation_client
         if _moderation_client is None:
-            _moderation_client = OpenAI(api_key=settings.openai_api_key.get_secret_value())
+            _moderation_client = OpenAI(
+                api_key=settings.openai_api_key.get_secret_value()
+            )
         resp = _moderation_client.moderations.create(
             model=settings.openai_moderation_model,
             input=text or "",
@@ -308,13 +335,16 @@ def _moderate_text(text: str) -> Optional[dict]:
 try:
     from .core.settings import settings
 except Exception:
+
     @dataclass
     class _Settings:
         openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         finnhub_api_key: str | None = os.getenv("FINNHUB_API_KEY")
+
     settings = _Settings()
 
 FINNHUB = _FinnhubClient(_get_secret_value(settings.finnhub_api_key))
+
 
 # ---------------- FastAPI app with lifespan ----------------
 def _openai_safe_name(name: str) -> str:
@@ -333,9 +363,10 @@ def _openai_safe_name(name: str) -> str:
     Returns:
         Sanitized name string safe for OpenAI APIs.
     """
-    n = re.sub(r'[^a-zA-Z0-9_-]+', '_', (name or '').strip())
-    n = n.strip('_')
-    return n or 'tool'
+    n = re.sub(r"[^a-zA-Z0-9_-]+", "_", (name or "").strip())
+    n = n.strip("_")
+    return n or "tool"
+
 
 def _sanitize_tool_objects_for_openai(tools: list) -> list:
     """
@@ -431,10 +462,15 @@ async def lifespan(app: FastAPI):
                 return tools or []
             except Exception as e:
                 last_err = e
-                logger.warning("MCP tool load attempt {}/{} failed: {}", i + 1, retries, e)
+                logger.warning(
+                    "MCP tool load attempt {}/{} failed: {}", i + 1, retries, e
+                )
                 await asyncio.sleep(delay)
-        logger.error("Failed to load MCP tools after {} attempts: {!r}", retries, last_err)
+        logger.error(
+            "Failed to load MCP tools after {} attempts: {!r}", retries, last_err
+        )
         return []
+
     try:
         mcp_enabled = (
             os.getenv("MCP_ENABLE", "false").lower() == "true"
@@ -453,15 +489,20 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("MCP world_bank disabled: {}", e)
 
-
     # --- Agent executors ---
     builtins = list(TOOLS)  # copy
     ALL_TOOLS = _sanitize_tool_objects_for_openai([*builtins, *extra_tools])
     ALL_TOOL_NAMES = [getattr(t, "name", "<unnamed>") for t in ALL_TOOLS]
-    logger.info("Agent tool registry initialized (n=%d): %s", len(ALL_TOOL_NAMES), ALL_TOOL_NAMES)
-    debug_flag = (os.getenv("AGENT_DEBUG", "1") == "1")
+    logger.info(
+        "Agent tool registry initialized (n=%d): %s",
+        len(ALL_TOOL_NAMES),
+        ALL_TOOL_NAMES,
+    )
+    debug_flag = os.getenv("AGENT_DEBUG", "1") == "1"
     rag_agent_chain = build_functions_agent(llm, ALL_TOOLS, debug=debug_flag)
-    rag_agent_chain_stream = build_functions_agent(llm_stream, ALL_TOOLS, debug=debug_flag)
+    rag_agent_chain_stream = build_functions_agent(
+        llm_stream, ALL_TOOLS, debug=debug_flag
+    )
     logger.info("Agent executors ready (streaming=%s, non-streaming=%s)", True, True)
     make_answer_prompt_fn = make_answer_prompt
 
@@ -489,6 +530,7 @@ app.add_middleware(
 
 
 # ---------- Middleware: Rate Limiting ----------
+
 
 @app.middleware("http")
 async def _rate_limit(request: Request, call_next):
@@ -527,11 +569,16 @@ app.include_router(td_router, tags=["td"])
 app.include_router(calc_api_router, tags=["calc"])
 # Analytics routes disabled (no-op)
 
-if (os.getenv("MCP_ENABLE", "false").lower() == "true" or os.getenv("MCP_PROXY_ENABLE", "false").lower() == "true"):
+if (
+    os.getenv("MCP_ENABLE", "false").lower() == "true"
+    or os.getenv("MCP_PROXY_ENABLE", "false").lower() == "true"
+):
     from .mcp_ext.router import router as mcp_router
+
     app.include_router(mcp_router, prefix="/api/mcp")
 
 # ---------- Exception Handlers ----------
+
 
 @app.exception_handler(HTTPException)
 async def _http_exc_handler(_req: Request, exc: HTTPException) -> JSONResponse:
@@ -579,12 +626,14 @@ async def _uncaught_exc_handler(_req: Request, exc: Exception) -> JSONResponse:
         content={"detail": "Internal Server Error"},
     )
 
+
 # ----------------------------
 # Admin-only maintenance route
 # ----------------------------
 
 
 if ADMIN_ROUTES_ENABLED:
+
     @app.post("/api/admin/rag/reindex")
     def admin_reindex(request: Request) -> Dict[str, bool]:
         """
@@ -608,15 +657,17 @@ if ADMIN_ROUTES_ENABLED:
         _require_admin(request)
         reindex()
         return {"ok": True}
+
 else:
-    logger.info("Admin routes disabled (ADMIN_KEY not set); skipping /api/admin/rag/reindex")
-
-
+    logger.info(
+        "Admin routes disabled (ADMIN_KEY not set); skipping /api/admin/rag/reindex"
+    )
 
 
 # ----------------------------
 # MCP JSON-RPC over WebSocket
 # ----------------------------
+
 
 @app.websocket("/mcp")
 async def mcp_ws(ws: WebSocket) -> None:
@@ -633,7 +684,9 @@ async def mcp_ws(ws: WebSocket) -> None:
     """
     await ws.accept()
     tools, tmap = _collect_tools()
-    await ws.send_text(json.dumps({"jsonrpc": "2.0", "id": 0, "result": {"ready": True}}))
+    await ws.send_text(
+        json.dumps({"jsonrpc": "2.0", "id": 0, "result": {"ready": True}})
+    )
 
     try:
         while True:
@@ -641,11 +694,15 @@ async def mcp_ws(ws: WebSocket) -> None:
             try:
                 req = json.loads(raw)
             except Exception:
-                await ws.send_text(json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {"code": -32700, "message": "Parse error"}
-                }))
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": None,
+                            "error": {"code": -32700, "message": "Parse error"},
+                        }
+                    )
+                )
                 continue
 
             mid: Optional[int] = req.get("id")
@@ -654,32 +711,43 @@ async def mcp_ws(ws: WebSocket) -> None:
 
             try:
                 if method == "ping":
-                    await ws.send_text(json.dumps({
-                        "jsonrpc": "2.0", "id": mid, "result": "pong"
-                    }))
+                    await ws.send_text(
+                        json.dumps({"jsonrpc": "2.0", "id": mid, "result": "pong"})
+                    )
 
                 elif method == "tools/list":
                     out: list[Dict[str, Any]] = []
                     for t in tools:
-                        out.append({
-                            "name": t.name,
-                            "description": getattr(t, "description", "") or "",
-                            "parameters": _tool_schema(t), 
-                        })
-                    await ws.send_text(json.dumps({
-                        "jsonrpc": "2.0", "id": mid, "result": {"tools": out}
-                    }))
+                        out.append(
+                            {
+                                "name": t.name,
+                                "description": getattr(t, "description", "") or "",
+                                "parameters": _tool_schema(t),
+                            }
+                        )
+                    await ws.send_text(
+                        json.dumps(
+                            {"jsonrpc": "2.0", "id": mid, "result": {"tools": out}}
+                        )
+                    )
 
                 elif method == "tools/call":
                     name = params.get("name")
                     arguments = params.get("arguments") or {}
 
                     if name not in tmap:
-                        await ws.send_text(json.dumps({
-                            "jsonrpc": "2.0",
-                            "id": mid,
-                            "error": {"code": -32602, "message": f"Unknown tool: {name}"}
-                        }))
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": mid,
+                                    "error": {
+                                        "code": -32602,
+                                        "message": f"Unknown tool: {name}",
+                                    },
+                                }
+                            )
+                        )
                         continue
 
                     tool = tmap[name]
@@ -691,30 +759,49 @@ async def mcp_ws(ws: WebSocket) -> None:
                         except TypeError:
                             payload = {"markdown": str(result)}
 
-                        await ws.send_text(json.dumps({
-                            "jsonrpc": "2.0", "id": mid, "result": payload
-                        }))
+                        await ws.send_text(
+                            json.dumps({"jsonrpc": "2.0", "id": mid, "result": payload})
+                        )
                     except Exception as e:
                         logger.exception("tool error %s: %r", name, e)
-                        await ws.send_text(json.dumps({
-                            "jsonrpc": "2.0",
-                            "id": mid,
-                            "error": {"code": -32000,
-                                      "message": f"tool error: {type(e).__name__}: {e}"}
-                        }))
+                        await ws.send_text(
+                            json.dumps(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": mid,
+                                    "error": {
+                                        "code": -32000,
+                                        "message": f"tool error: {type(e).__name__}: {e}",
+                                    },
+                                }
+                            )
+                        )
 
                 else:
-                    await ws.send_text(json.dumps({
-                        "jsonrpc": "2.0", "id": mid,
-                        "error": {"code": -32601, "message": "Method not found"}
-                    }))
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": mid,
+                                "error": {
+                                    "code": -32601,
+                                    "message": "Method not found",
+                                },
+                            }
+                        )
+                    )
 
             except Exception as e:
                 logger.exception("/mcp dispatch error: %r", e)
-                await ws.send_text(json.dumps({
-                    "jsonrpc": "2.0", "id": mid,
-                    "error": {"code": -32001, "message": "Internal error"}
-                }))
+                await ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": mid,
+                            "error": {"code": -32001, "message": "Internal error"},
+                        }
+                    )
+                )
 
     except WebSocketDisconnect:
         return
@@ -733,9 +820,11 @@ async def mcp_delete() -> Response:
     """
     return Response(status_code=204)
 
+
 # ----------------------------
 # Session helper
 # ----------------------------
+
 
 def _ensure_session(db: SASession, sid: Optional[str], title: str = "Chat") -> str:
     """
@@ -755,6 +844,7 @@ def _ensure_session(db: SASession, sid: Optional[str], title: str = "Chat") -> s
 # ----------------------------
 # Helper functions
 # ----------------------------
+
 
 def _has_useful_docs(q: str) -> tuple[bool, float]:
     """
@@ -796,6 +886,7 @@ def _has_useful_docs(q: str) -> tuple[bool, float]:
             docs = raw or []
 
         from .llm.rag import _doc_max_score
+
         s = _doc_max_score(docs)
         return ((len(docs) > 0 and s >= 0.20), s)
     except Exception:
@@ -831,9 +922,11 @@ def _collect_tools() -> Tuple[list, Dict[str, Any]]:
     tmap = {t.name: t for t in tools}
     return tools, tmap
 
+
 # ----------------------------
 # Token estimation helpers
 # ----------------------------
+
 
 def _approx_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float | None:
     """
@@ -852,21 +945,19 @@ def _approx_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float
     """
     try:
         from .core.settings import PRICING
+
         mp = PRICING.get(model)
         if not mp:
             return None
-        return (
-            (input_tokens / 1000.0) * mp.input_per_1k +
-            (output_tokens / 1000.0) * mp.output_per_1k
-        )
+        return (input_tokens / 1000.0) * mp.input_per_1k + (
+            output_tokens / 1000.0
+        ) * mp.output_per_1k
     except Exception:
         return None
 
 
 def _approx_count_tokens(
-    model: str,
-    prompt_messages: list[dict],
-    completion_text: str
+    model: str, prompt_messages: list[dict], completion_text: str
 ) -> tuple[int, int]:
     """
     Fallback token counter (rough estimate, model-agnostic).
@@ -955,9 +1046,9 @@ def _is_offtopic_reply(text: str) -> bool:
 # Build Sources from Tools + Docs
 # ----------------------------
 
+
 async def _build_sources_from_steps_and_docs(
-    steps: list[Any],
-    question: str
+    steps: list[Any], question: str
 ) -> list[dict]:
     """
     Build the 'sources' array to display in the UI.
@@ -978,20 +1069,27 @@ async def _build_sources_from_steps_and_docs(
             tname = getattr(action, "tool", None)
             if tname:
                 tool_names_used.add(str(tname))
-            traces.append({
-                "tool": tname,
-                "args": getattr(action, "tool_input", {}) if action else {},
-                "observation": observation,
-            })
+            traces.append(
+                {
+                    "tool": tname,
+                    "args": getattr(action, "tool_input", {}) if action else {},
+                    "observation": observation,
+                }
+            )
         else:
             traces.append({"tool": None, "args": None, "observation": step})
 
     # --- Convert tool traces → sources ---
     _raw_tool_items = tools_trace_to_sources(traces)
-    tool_items = list(_raw_tool_items) if isinstance(_raw_tool_items, (list, tuple)) else []
+    tool_items = (
+        list(_raw_tool_items) if isinstance(_raw_tool_items, (list, tuple)) else []
+    )
     if not isinstance(_raw_tool_items, (list, tuple)):
-        logger.warning("tools_trace_to_sources returned %r (type=%s); coerced to []",
-                       _raw_tool_items, type(_raw_tool_items).__name__)
+        logger.warning(
+            "tools_trace_to_sources returned %r (type=%s); coerced to []",
+            _raw_tool_items,
+            type(_raw_tool_items).__name__,
+        )
 
     # Normalize tool source fields
     for it in tool_items:
@@ -999,21 +1097,32 @@ async def _build_sources_from_steps_and_docs(
         it.setdefault("title", it.get("display") or it.get("tool") or "Tool")
         disp = it.get("display")
         if not isinstance(disp, str):
-            it["display"] = (str(disp)[:160] if disp is not None else it.get("title", "Tool"))
+            it["display"] = (
+                str(disp)[:160] if disp is not None else it.get("title", "Tool")
+            )
         it["title"] = str(it.get("title") or "Tool")[:160]
 
     # --- Append standard vendor badges when certain tool families were used ---
     if any(t in STOCK_TOOL_NAMES for t in tool_names_used):
-        found = any((it.get("href") == FINNHUB_SOURCE["href"]) or
-                    (it.get("url") == FINNHUB_SOURCE["url"]) or
-                    (it.get("id") == FINNHUB_SOURCE["id"]) for it in tool_items)
+        found = any(
+            (it.get("href") == FINNHUB_SOURCE["href"])
+            or (it.get("url") == FINNHUB_SOURCE["url"])
+            or (it.get("id") == FINNHUB_SOURCE["id"])
+            for it in tool_items
+        )
         if not found:
             tool_items.append(dict(FINNHUB_SOURCE))
 
-    if any("world_bank" in str(t).lower() or "worldbank" in str(t).lower() for t in tool_names_used):
-        found = any((it.get("href") == WORLD_BANK_SOURCE["href"]) or
-                    (it.get("url") == WORLD_BANK_SOURCE["url"]) or
-                    (it.get("id") == WORLD_BANK_SOURCE["id"]) for it in tool_items)
+    if any(
+        "world_bank" in str(t).lower() or "worldbank" in str(t).lower()
+        for t in tool_names_used
+    ):
+        found = any(
+            (it.get("href") == WORLD_BANK_SOURCE["href"])
+            or (it.get("url") == WORLD_BANK_SOURCE["url"])
+            or (it.get("id") == WORLD_BANK_SOURCE["id"])
+            for it in tool_items
+        )
         if not found:
             tool_items.append(dict(WORLD_BANK_SOURCE))
 
@@ -1022,8 +1131,10 @@ async def _build_sources_from_steps_and_docs(
         combined = tool_items
         all_items = dedupe_sources(combined) or []
         if not isinstance(all_items, list):
-            logger.warning("dedupe_sources returned non-list (type=%s); falling back to combined",
-                           type(all_items).__name__)
+            logger.warning(
+                "dedupe_sources returned non-list (type=%s); falling back to combined",
+                type(all_items).__name__,
+            )
             all_items = combined
         return all_items or []
 
@@ -1050,8 +1161,14 @@ async def _build_sources_from_steps_and_docs(
 
     for d in docs or []:
         md = dict(getattr(d, "metadata", {}) or {})
-        src = (md.get("source") or md.get("file") or md.get("path") or
-               md.get("url") or md.get("title") or "")
+        src = (
+            md.get("source")
+            or md.get("file")
+            or md.get("path")
+            or md.get("url")
+            or md.get("title")
+            or ""
+        )
         page = md.get("page")
 
         if isinstance(src, str) and src.lower().endswith(".pdf"):
@@ -1060,7 +1177,11 @@ async def _build_sources_from_steps_and_docs(
             name_no_ext = os.path.splitext(base)[0]
             title_like = re.sub(r"[_\\-]+", " ", name_no_ext).strip()
             try:
-                from utils.utils import find_book_citations_in_text, book_source_from_title
+                from utils.utils import (
+                    find_book_citations_in_text,
+                    book_source_from_title,
+                )
+
                 cands = find_book_citations_in_text(title_like)
                 if cands:
                     s2 = book_source_from_title(cands[0])
@@ -1070,7 +1191,14 @@ async def _build_sources_from_steps_and_docs(
                 pass
             s["type"] = "doc"
         else:
-            s = normalize_source({"source": src, "url": md.get("url"), "title": md.get("title"), "page": page})
+            s = normalize_source(
+                {
+                    "source": src,
+                    "url": md.get("url"),
+                    "title": md.get("title"),
+                    "page": page,
+                }
+            )
 
         # Attach page number to display where available
         if page not in (None, "", "?"):
@@ -1090,8 +1218,10 @@ async def _build_sources_from_steps_and_docs(
     combined = doc_items
     all_items = dedupe_sources(combined) or []
     if not isinstance(all_items, list):
-        logger.warning("dedupe_sources returned non-list (type=%s); falling back to combined",
-                       type(all_items).__name__)
+        logger.warning(
+            "dedupe_sources returned non-list (type=%s); falling back to combined",
+            type(all_items).__name__,
+        )
         all_items = combined
     return all_items or []
 
@@ -1100,11 +1230,9 @@ async def _build_sources_from_steps_and_docs(
 # Agent Call Wrapper
 # ----------------------------
 
+
 async def _call_agent(
-    agent: Any,
-    inputs: dict,
-    callbacks: Optional[list[Any]] = None,
-    **kwargs
+    agent: Any, inputs: dict, callbacks: Optional[list[Any]] = None, **kwargs
 ) -> Any:
     """
     Invoke a LangChain agent in a uniform async way.
@@ -1154,6 +1282,7 @@ async def _call_agent(
 # SSE Token Handler
 # ----------------------------
 
+
 class SSETokenHandler(AsyncCallbackHandler):
     """
     LangChain callback handler that streams tokens via SSE.
@@ -1177,8 +1306,8 @@ class SSETokenHandler(AsyncCallbackHandler):
         await self.queue.put(None)
 
 
-
 # ---------------- Chat endpoint ----------------
+
 
 @app.post("/api/chat")
 async def chat(
@@ -1238,7 +1367,9 @@ async def chat(
     # --- Moderation ---
     mod = _moderate_text(raw_question)
     if mod and mod.get("flagged"):
-        session_id = _ensure_session(db, (request.headers.get("X-Session-Id") or "").strip(), "Chat")
+        session_id = _ensure_session(
+            db, (request.headers.get("X-Session-Id") or "").strip(), "Chat"
+        )
         append_message(db, session_id, "user", raw_question, None)
         text = "I’m here to help with safe, finance-focused questions. Please rephrase or ask about investing, markets, or personal finance topics."
         append_message(db, session_id, "assistant", text, None)
@@ -1271,9 +1402,7 @@ async def chat(
     sid_hint = auth_sid or header_sid
 
     if re.match(r"^\s*(hi|hello|hey|howdy|hiya)\b", raw_question, re.I):
-        session_id = _ensure_session(
-            db, sid_hint, "Chat"
-        )
+        session_id = _ensure_session(db, sid_hint, "Chat")
         append_message(db, session_id, "user", raw_question, None)
         text = "Hello! How can I help with your investing or market questions today?"
         append_message(db, session_id, "assistant", text, None)
@@ -1296,6 +1425,7 @@ async def chat(
 
     try:
         from .llm.rag import translate_query
+
         question = translate_query(raw_question) or raw_question
     except Exception:
         question = raw_question
@@ -1352,7 +1482,12 @@ async def chat(
     # 2) Capability guard: if no docs and no tools, also refuse.
     allow_summary = is_summary
     has_docs, max_score = _has_useful_docs(question)
-    if (not has_docs) and (not allow_tools) and (not tools_exist) and (not allow_summary):
+    if (
+        (not has_docs)
+        and (not allow_tools)
+        and (not tools_exist)
+        and (not allow_summary)
+    ):
         logger.info(
             "GUARD_METRIC | kind=no_rag_no_tools max_score=%.3f q=%s",
             max_score,
@@ -1405,6 +1540,7 @@ async def chat(
     # --- Input token size guard ---
     try:
         import tiktoken
+
         enc = tiktoken.get_encoding("cl100k_base")
         joined = "\n".join(f"{m['role']}:{m['content']}" for m in history)
         approx_in = len(enc.encode(joined))
@@ -1419,7 +1555,9 @@ async def chat(
     with with_token_log(model_name) as usage:
         cbs = usage.get("callbacks") or []
         logger.info("CHAT start sid=%s model=%s", session_id, model_name)
-        logger.info("with_token_log: callbacks attached? %s (n=%d)", bool(cbs), len(cbs))
+        logger.info(
+            "with_token_log: callbacks attached? %s (n=%d)", bool(cbs), len(cbs)
+        )
 
         result: dict = await _call_agent(
             rag_agent_chain,
@@ -1503,7 +1641,6 @@ async def chat(
     append_message(db, session_id, "assistant", text, None)
     touch_session(db, session_id)
 
-
     # --- Token usage + cost ---
     pt = int(usage.get("prompt_tokens", 0) or 0)
     ct = int(usage.get("completion_tokens", 0) or 0)
@@ -1560,8 +1697,8 @@ async def chat(
     }
 
 
-
 # ---------------- Streaming Chat endpoint ----------------
+
 
 @app.post("/api/chat/stream")
 async def chat_stream(
@@ -1608,29 +1745,36 @@ async def chat_stream(
     # --- Moderation ---
     mod = _moderate_text(raw_question)
     if mod and mod.get("flagged"):
+
         async def g_moderation():
             def sse(obj: dict) -> bytes:
-                return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8")
+                return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode(
+                    "utf-8"
+                )
+
             yield b":" + b" " * 2048 + b"\n\n"
             yield sse({"token": ""})
             text = "I’m here to help with safe, finance-focused questions. Please rephrase or ask about investing, markets, or personal finance topics."
             for ch in text:
                 yield sse({"token": ch})
                 await asyncio.sleep(0)
-            yield sse({
-                "done": True,
-                "text": text,
-                "final": text,
-                "sources": [],
-                "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "cost_usd": 0.0,
-                    "model": "moderation",
-                    "synthetic": True,
-                },
-            })
+            yield sse(
+                {
+                    "done": True,
+                    "text": text,
+                    "final": text,
+                    "sources": [],
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "cost_usd": 0.0,
+                        "model": "moderation",
+                        "synthetic": True,
+                    },
+                }
+            )
+
         return StreamingResponse(
             g_moderation(),
             media_type="text/event-stream",
@@ -1653,16 +1797,31 @@ async def chat_stream(
     sid_hint = auth_sid or header_sid
 
     if re.match(r"^\s*(hi|hello|hey|howdy|hiya)\b", raw_question, re.I):
+
         async def g():
             def sse(obj: dict) -> bytes:
-                return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8")
+                return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode(
+                    "utf-8"
+                )
+
             yield b":" + b" " * 2048 + b"\n\n"
             yield sse({"token": ""})
-            text = "Hello! How can I help with your investing or market questions today?"
+            text = (
+                "Hello! How can I help with your investing or market questions today?"
+            )
             for ch in text:
                 yield sse({"token": ch})
                 await asyncio.sleep(0)
-            yield sse({"done": True, "text": text, "final": text, "sources": [], "usage": {"total_tokens": 0}})
+            yield sse(
+                {
+                    "done": True,
+                    "text": text,
+                    "final": text,
+                    "sources": [],
+                    "usage": {"total_tokens": 0},
+                }
+            )
+
         return StreamingResponse(
             g(),
             media_type="text/event-stream",
@@ -1675,6 +1834,7 @@ async def chat_stream(
 
     try:
         from .llm.rag import translate_query
+
         question = translate_query(raw_question) or raw_question
     except Exception:
         question = raw_question
@@ -1693,26 +1853,31 @@ async def chat_stream(
 
         async def g_nonfinance():
             def sse(obj: dict) -> bytes:
-                return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode("utf-8")
+                return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n".encode(
+                    "utf-8"
+                )
+
             yield b":" + b" " * 2048 + b"\n\n"
             yield sse({"token": ""})
             for ch in _GUARD_REPLY:
                 yield sse({"token": ch})
                 await asyncio.sleep(0)
-            yield sse({
-                "done": True,
-                "text": _GUARD_REPLY,
-                "final": _GUARD_REPLY,
-                "sources": [],
-                "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "cost_usd": 0.0,
-                    "model": "guard",
-                    "synthetic": True,
-                },
-            })
+            yield sse(
+                {
+                    "done": True,
+                    "text": _GUARD_REPLY,
+                    "final": _GUARD_REPLY,
+                    "sources": [],
+                    "usage": {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "total_tokens": 0,
+                        "cost_usd": 0.0,
+                        "model": "guard",
+                        "synthetic": True,
+                    },
+                }
+            )
 
         # Emit a lightweight analytics event for guard usage.
         try:
@@ -1750,6 +1915,7 @@ async def chat_stream(
     try:
         # Size guard
         import tiktoken
+
         enc = tiktoken.get_encoding("cl100k_base")
         joined = "\n".join(f"{m['role']}:{m['content']}" for m in history)
         approx_in = len(enc.encode(joined))
@@ -1780,7 +1946,12 @@ async def chat_stream(
         except Exception:
             tools_exist = False
 
-        if (not has_docs) and (not allow_tools) and (not tools_exist) and (not allow_summary):
+        if (
+            (not has_docs)
+            and (not allow_tools)
+            and (not tools_exist)
+            and (not allow_summary)
+        ):
             logger.info(
                 "GUARD_METRIC | kind=no_rag_no_tools max_score=%.3f q=%s",
                 max_score,
@@ -1793,18 +1964,20 @@ async def chat_stream(
                 for ch in _GUARD_REPLY:
                     yield sse({"token": ch})
                     await asyncio.sleep(0)
-                yield sse({
-                    "done": True,
-                    "sources": [],
-                    "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "total_tokens": 0,
-                        "cost_usd": 0.0,
-                        "model": "guard",
-                        "synthetic": True,
-                    },
-                })
+                yield sse(
+                    {
+                        "done": True,
+                        "sources": [],
+                        "usage": {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "total_tokens": 0,
+                            "cost_usd": 0.0,
+                            "model": "guard",
+                            "synthetic": True,
+                        },
+                    }
+                )
                 return
 
         try:
@@ -1823,7 +1996,9 @@ async def chat_stream(
                         callbacks=cbs,
                     )
                 )
-                agent_task.add_done_callback(lambda _f: stream_cb.queue.put_nowait(None))
+                agent_task.add_done_callback(
+                    lambda _f: stream_cb.queue.put_nowait(None)
+                )
 
                 buf_tokens: list[str] = []
 
@@ -1870,7 +2045,9 @@ async def chat_stream(
             if any_tool_used and addon and addon.strip():
                 text = addon.strip()
             elif addon and addon.strip() and addon.strip() not in (text or ""):
-                text = (text.rstrip() + "\n\n" + addon.strip()) if text else addon.strip()
+                text = (
+                    (text.rstrip() + "\n\n" + addon.strip()) if text else addon.strip()
+                )
 
             if not (text and text.strip()):
                 text = "".join(buf_tokens).strip()
@@ -1889,7 +2066,9 @@ async def chat_stream(
                             raw_obs.append(observation.strip())
                     if raw_obs:
                         text = "\n\n".join(raw_obs)
-                        logger.warning("Using raw tool observations as response [stream]")
+                        logger.warning(
+                            "Using raw tool observations as response [stream]"
+                        )
                 except Exception as e:
                     logger.warning("Failed to extract raw observations [stream]: %s", e)
             # Clean up formatting
@@ -1899,7 +2078,7 @@ async def chat_stream(
                 CHUNK = 160
                 if not emitted_any:
                     for i in range(0, len(text), CHUNK):
-                        yield sse({"token": text[i:i+CHUNK]})
+                        yield sse({"token": text[i : i + CHUNK]})
                         await asyncio.sleep(0)
                     emitted_any = True
             else:
@@ -1955,24 +2134,31 @@ async def chat_stream(
 
             logger.info(
                 "USAGE sid=%s model=%s pt=%d ct=%d tt=%d cost=$%.6f",
-                session_id, model_used, pt, ct, tt, float(cu or 0.0),
+                session_id,
+                model_used,
+                pt,
+                ct,
+                tt,
+                float(cu or 0.0),
             )
 
-            yield sse({
-                "done": True,
-                "text": text,
-                "final": text,
-                "sources": tool_sources,
-                "usage": {
-                    "prompt_tokens": pt,
-                    "completion_tokens": ct,
-                    "total_tokens": tt,
-                    "cost_usd": cu,
-                    "model": model_used,
-                    "input_tokens": pt,
-                    "output_tokens": ct,
-                },
-            })
+            yield sse(
+                {
+                    "done": True,
+                    "text": text,
+                    "final": text,
+                    "sources": tool_sources,
+                    "usage": {
+                        "prompt_tokens": pt,
+                        "completion_tokens": ct,
+                        "total_tokens": tt,
+                        "cost_usd": cu,
+                        "model": model_used,
+                        "input_tokens": pt,
+                        "output_tokens": ct,
+                    },
+                }
+            )
 
             # --- Analytics ---
             latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -2006,25 +2192,31 @@ async def chat_stream(
             except Exception:
                 pass
 
-            yield sse({
-                "done": True,
-                "text": partial,
-                "final": partial,
-                "sources": [],
-                "usage": {"total_tokens": 0},
-            })
+            yield sse(
+                {
+                    "done": True,
+                    "text": partial,
+                    "final": partial,
+                    "sources": [],
+                    "usage": {"total_tokens": 0},
+                }
+            )
             return
 
         finally:
             try:
-                if 'agent_task' in locals() and isinstance(agent_task, asyncio.Task) and not agent_task.done():
+                if (
+                    "agent_task" in locals()
+                    and isinstance(agent_task, asyncio.Task)
+                    and not agent_task.done()
+                ):
                     agent_task.cancel()
                     with suppress(asyncio.CancelledError):
                         await agent_task
             except Exception:
                 pass
             try:
-                if 'stream_cb' in locals() and hasattr(stream_cb, 'queue'):
+                if "stream_cb" in locals() and hasattr(stream_cb, "queue"):
                     stream_cb.queue.put_nowait(None)
             except Exception:
                 pass
@@ -2043,6 +2235,7 @@ async def chat_stream(
 # ----------------------------
 # Chat Export Endpoints
 # ----------------------------
+
 
 @app.get("/api/chat/{session_id}/export.json")
 def export_json(
@@ -2066,24 +2259,24 @@ def export_json(
     """
     _require_client_auth(request, session_id)
     rows = list_messages(db, session_id, limit=2000)
-    return JSONResponse({
-        "sessionId": session_id,
-        "messages": [
-            {
-                "id": r.id,
-                "role": r.role,
-                "content": r.content,
-                "created_at": r.created_at.isoformat(),
-            }
-            for r in rows
-        ],
-    })
+    return JSONResponse(
+        {
+            "sessionId": session_id,
+            "messages": [
+                {
+                    "id": r.id,
+                    "role": r.role,
+                    "content": r.content,
+                    "created_at": r.created_at.isoformat(),
+                }
+                for r in rows
+            ],
+        }
+    )
 
 
 @app.get("/api/chat/{session_id}/export.pdf")
-def export_pdf(
-    session_id: str, request: Request, db: SASession = Depends(get_db)
-):
+def export_pdf(session_id: str, request: Request, db: SASession = Depends(get_db)):
     """
     Export conversation as a styled PDF (via WeasyPrint).
 
@@ -2111,9 +2304,9 @@ def export_pdf(
     for r in rows:
         role = (r.role or "").lower()
         cls = (
-            "user" if role == "user"
-            else "assistant" if role == "assistant"
-            else "system"
+            "user"
+            if role == "user"
+            else "assistant" if role == "assistant" else "system"
         )
         safe = (
             (r.content or "")
@@ -2131,6 +2324,7 @@ def export_pdf(
 
     try:
         from weasyprint import HTML
+
         pdf_io = io.BytesIO()
         HTML(string=html_str).write_pdf(pdf_io)
         pdf_io.seek(0)
@@ -2173,12 +2367,14 @@ def export_csv(
     writer.writerow(["id", "created_at", "role", "content"])
 
     for r in rows:
-        writer.writerow([
-            r.id,
-            r.created_at.isoformat(),
-            (r.role or ""),
-            (r.content or ""),
-        ])
+        writer.writerow(
+            [
+                r.id,
+                r.created_at.isoformat(),
+                (r.role or ""),
+                (r.content or ""),
+            ]
+        )
 
     buf.seek(0)
     return StreamingResponse(
@@ -2188,6 +2384,7 @@ def export_csv(
             "Content-Disposition": f'attachment; filename="chat-{session_id}.csv"'
         },
     )
+
 
 @app.get("/api/chat/{session_id}/export.txt")
 def export_txt(
@@ -2202,7 +2399,9 @@ def export_txt(
     body = "\n".join(lines)
     return PlainTextResponse(
         body,
-        headers={"Content-Disposition": f'attachment; filename="chat-{session_id}.txt"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="chat-{session_id}.txt"'
+        },
     )
 
 
@@ -2228,9 +2427,11 @@ def export_md(
         media_type="text/markdown",
     )
 
+
 # ----------------------------
 # Health Check
 # ----------------------------
+
 
 @app.get("/api/health")
 def health() -> dict[str, bool]:
@@ -2241,6 +2442,7 @@ def health() -> dict[str, bool]:
         {"ok": True}
     """
     return {"ok": True}
+
 
 @app.get("/api/version")
 def version() -> dict[str, str]:
@@ -2255,6 +2457,7 @@ def version() -> dict[str, str]:
 # Debug: Stream Simulation
 # ----------------------------
 
+
 @app.get("/api/_debug/stream")
 async def _debug_stream() -> StreamingResponse:
     """
@@ -2265,6 +2468,7 @@ async def _debug_stream() -> StreamingResponse:
         - "Hello world!"
         - Final done frame
     """
+
     async def g():
         def sse(obj: dict) -> bytes:
             return f"data: {json.dumps(obj)}\n\n".encode("utf-8")
@@ -2292,6 +2496,7 @@ async def _debug_stream() -> StreamingResponse:
 # ----------------------------
 # Debug: Token Usage Probe
 # ----------------------------
+
 
 @app.get("/api/_debug/usage")
 async def _debug_usage() -> dict[str, Any]:
@@ -2351,6 +2556,7 @@ async def _debug_usage() -> dict[str, Any]:
 # Debug: Finnhub Probe
 # ----------------------------
 
+
 @app.get("/api/_debug/finnhub_news")
 async def _debug_finnhub_news(
     symbol: str = "AAPL",
@@ -2381,10 +2587,14 @@ async def _debug_finnhub_news(
         _from = (today - timedelta(days=7)).isoformat()
 
     try:
-        data = await FINNHUB.get("/company-news", {"symbol": symbol, "from": _from, "to": _to})
+        data = await FINNHUB.get(
+            "/company-news", {"symbol": symbol, "from": _from, "to": _to}
+        )
         return {"ok": True, "count": len(data or []), "sample": (data or [])[:3]}
     except httpx.TimeoutException as e:
-        return JSONResponse({"ok": False, "kind": "timeout", "error": str(e)}, status_code=504)
+        return JSONResponse(
+            {"ok": False, "kind": "timeout", "error": str(e)}, status_code=504
+        )
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
 
@@ -2393,12 +2603,15 @@ async def _debug_finnhub_news(
 def _debug_rag_status():
     try:
         from .llm.rag import get_vectorstore, _estimate_collection_size
+
         vs = get_vectorstore()
         size = _estimate_collection_size(vs)
         backend = (os.getenv("VECTORSTORE", "qdrant") or "qdrant").lower()
         meta = {
             "backend": backend,
-            "collection": os.getenv("QDRANT_COLLECTION") if backend == "qdrant" else None,
+            "collection": (
+                os.getenv("QDRANT_COLLECTION") if backend == "qdrant" else None
+            ),
             "estimated_vectors": size,
             "retriever_ready": _get_retriever_lazy() is not None,
         }
@@ -2406,16 +2619,20 @@ def _debug_rag_status():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.get("/api/_debug/tools")
 async def _debug_tools():
     tools, _ = _collect_tools()
-    return {"count": len(tools), "names": [getattr(t, "name", "<unnamed>") for t in tools]}
-
+    return {
+        "count": len(tools),
+        "names": [getattr(t, "name", "<unnamed>") for t in tools],
+    }
 
 
 # ---------- MCP Debug ----------
 from .mcp_ext.registry import resolve_server
 from .mcp_ext.client import list_tools as _mcp_list_tools, call_tool as _mcp_call_tool
+
 
 @app.get("/api/_debug/mcp_ping")
 async def _debug_mcp_ping() -> dict:
@@ -2440,6 +2657,7 @@ async def _debug_mcp_ping() -> dict:
         }
     except Exception as e:
         return {"ok": False, "server": server, "error": str(e)}
+
 
 @app.post("/api/_debug/mcp_call")
 async def _debug_mcp_call(payload: dict) -> dict:

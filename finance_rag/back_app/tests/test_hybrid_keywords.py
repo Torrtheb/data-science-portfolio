@@ -30,7 +30,9 @@ def test_hybrid_retriever_prefers_keyword_matching_docs():
 
     out = hr._get_relevant_documents("How does diversification in an ETF work?")
     assert len(out) == 1
-    assert "diversification" in [kw.lower() for kw in out[0].metadata.get("keywords", [])]
+    assert "diversification" in [
+        kw.lower() for kw in out[0].metadata.get("keywords", [])
+    ]
 
 
 def test_hybrid_retriever_falls_back_when_no_keyword_match():
@@ -53,4 +55,3 @@ def test_hybrid_retriever_falls_back_when_no_keyword_match():
     out = hr._get_relevant_documents("What is portfolio beta?")
     # No overlap between query and keywords → original fused ordering preserved.
     assert out == [d1, d2]
-

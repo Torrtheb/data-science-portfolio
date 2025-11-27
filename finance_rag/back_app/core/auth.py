@@ -79,4 +79,3 @@ def _parse_bearer(auth_header: Optional[str]) -> Optional[str]:
 session_tokens = SessionTokenManager(
     settings.session_token_secret, settings.session_token_ttl_seconds
 )
-

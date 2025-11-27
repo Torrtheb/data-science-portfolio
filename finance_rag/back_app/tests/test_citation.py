@@ -6,14 +6,19 @@ import pytest
 
 # --- Load the non-package module by file path ---
 import back_app.utils.citations as citation
+
 # ----------------------------
 # Normalization helpers
 # ----------------------------
 
+
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        ("I_Will_Teach_You_to_be_Rich_Ramit_Sethi.pdf", "i_will_teach_you_to_be_rich_ramit_sethi"),
+        (
+            "I_Will_Teach_You_to_be_Rich_Ramit_Sethi.pdf",
+            "i_will_teach_you_to_be_rich_ramit_sethi",
+        ),
         ("The Bogleheads’ Guide to Investing", "the_bogleheads_guide_to_investing"),
         ("Weird%27Title.PDF", "weird_title"),
         ("  Mixed—Punctuations!? ", "mixed_punctuations"),
@@ -59,6 +64,7 @@ def test__looks_like_pdf(s, looks):
 # Books indices and builders
 # ----------------------------
 
+
 def test_books_indices_have_expected_keys():
     # The module defines BOOKS with three items; indices should include normalized keys.
     assert isinstance(citation.BOOKS, dict) and len(citation.BOOKS) >= 3
@@ -90,12 +96,16 @@ def test_book_source_from_filename_known_and_unknown():
 # normalize_source
 # ----------------------------
 
+
 @pytest.mark.parametrize(
     "item, expect",
     [
-        ("https://example.com/a.pdf?dl=1", ("book", None)),       # PDF url → book
-        ("https://example.com/post", ("web", "https://example.com/post")),  # plain URL → web
-        ("Some free text", ("web", None)),                        # not URL/PDF → web, href None
+        ("https://example.com/a.pdf?dl=1", ("book", None)),  # PDF url → book
+        (
+            "https://example.com/post",
+            ("web", "https://example.com/post"),
+        ),  # plain URL → web
+        ("Some free text", ("web", None)),  # not URL/PDF → web, href None
     ],
 )
 def test_normalize_source_str(item, expect):
@@ -121,12 +131,20 @@ def test_normalize_source_dict_pre_norm_web_and_pdf_and_title():
     # Dict with url+title
     d3 = {"url": "https://news.site/a", "title": "Breaking News"}
     out3 = citation.normalize_source(d3)
-    assert out3["type"] == "web" and out3["href"] == "https://news.site/a" and out3["display"] == "Breaking News"
+    assert (
+        out3["type"] == "web"
+        and out3["href"] == "https://news.site/a"
+        and out3["display"] == "Breaking News"
+    )
 
     # Dict with only title → web with href None
     d4 = {"title": "Only A Title"}
     out4 = citation.normalize_source(d4)
-    assert out4["type"] == "web" and out4["href"] is None and out4["display"] == "Only A Title"
+    assert (
+        out4["type"] == "web"
+        and out4["href"] is None
+        and out4["display"] == "Only A Title"
+    )
 
     # Arbitrary dict → web display=str(dict)
     d5 = {"foo": 1}
@@ -138,13 +156,14 @@ def test_normalize_source_dict_pre_norm_web_and_pdf_and_title():
 # dedupe_sources
 # ----------------------------
 
+
 def test_dedupe_sources_by_href_then_display_and_assigns_ids():
     items = [
-        "https://site/a",                  # web by URL
-        {"url": "https://site/a"},         # duplicate by same href
-        "A free text",                     # web by display (no href)
+        "https://site/a",  # web by URL
+        {"url": "https://site/a"},  # duplicate by same href
+        "A free text",  # web by display (no href)
         {"display": "A free text", "type": "web"},  # duplicate by display
-        {"url": "https://site/b", "title": "B"},    # unique
+        {"url": "https://site/b", "title": "B"},  # unique
     ]
     out = citation.dedupe_sources(items)
     # Expect 3 uniques: site/a, "A free text", site/b
@@ -158,16 +177,35 @@ def test_dedupe_sources_by_href_then_display_and_assigns_ids():
 # tools_trace_to_sources
 # ----------------------------
 
+
 def test_tools_trace_to_sources_agent_and_mcp_and_ledger():
     traces = [
         # Agent-style normal tool
-        {"tool": "web_search", "args": {"q": "tesla"}, "observation": "Found 10 results..."},
+        {
+            "tool": "web_search",
+            "args": {"q": "tesla"},
+            "observation": "Found 10 results...",
+        },
         # Agent-style MCP tool
-        {"tool": "mcp:world_bank:get_indicator_for_country", "args": {"country_id": "CAN"}, "observation": {"value": 42}},
+        {
+            "tool": "mcp:world_bank:get_indicator_for_country",
+            "args": {"country_id": "CAN"},
+            "observation": {"value": 42},
+        },
         # Ledger-style normal item
-        {"name": "http_fetch", "ok": True, "duration_ms": 120, "meta": {"status": 200, "path": "/news"}},
+        {
+            "name": "http_fetch",
+            "ok": True,
+            "duration_ms": 120,
+            "meta": {"status": 200, "path": "/news"},
+        },
         # Ledger-style MCP item
-        {"name": "mcp:world_bank:get_countries", "ok": False, "duration_ms": 15, "meta": {"error": "boom"}},
+        {
+            "name": "mcp:world_bank:get_countries",
+            "ok": False,
+            "duration_ms": 15,
+            "meta": {"error": "boom"},
+        },
     ]
     out = citation.tools_trace_to_sources(traces)
     # Four entries back
@@ -180,15 +218,14 @@ def test_tools_trace_to_sources_agent_and_mcp_and_ledger():
     assert any(d.startswith("MCP:world_bank/get_countries") for d in disp)
     # Ledger normal has "🧰" and status suffix
     assert any(
-        d.startswith("🧰 http_fetch")
-        and " — ok" in d
-        and "120ms" in d
-        for d in disp
+        d.startswith("🧰 http_fetch") and " — ok" in d and "120ms" in d for d in disp
     )
+
 
 # ----------------------------
 # _filter_sources_to_text
 # ----------------------------
+
 
 def test_filter_sources_to_text_rules_and_dedupe():
     text = (
@@ -200,16 +237,28 @@ def test_filter_sources_to_text_rules_and_dedupe():
         # Tool source — always kept
         {"type": "tool", "display": "🔧 web_search", "href": None},
         # Web source that appears as a bare URL
-        {"type": "web", "display": "Alpha Example", "href": "https://alpha.example.com/post"},
+        {
+            "type": "web",
+            "display": "Alpha Example",
+            "href": "https://alpha.example.com/post",
+        },
         # Web source by host match (different path)
-        {"type": "web", "display": "Gamma Site", "href": "https://gamma.example.com/another"},
+        {
+            "type": "web",
+            "display": "Gamma Site",
+            "href": "https://gamma.example.com/another",
+        },
         # Web source NOT in text at all
         {"type": "web", "display": "Delta Site", "href": "https://delta.example.com/x"},
         # Doc/book source kept (keep_docs_if_present=True)
         {"type": "book", "display": "Some Book"},
         {"type": "doc", "display": "Internal Doc"},
         # Duplicate (same href as Alpha)
-        {"type": "web", "display": "Alpha Dup", "href": "https://alpha.example.com/post"},
+        {
+            "type": "web",
+            "display": "Alpha Dup",
+            "href": "https://alpha.example.com/post",
+        },
     ]
 
     kept = citation._filter_sources_to_text(text, sources, keep_docs_if_present=True)
@@ -232,7 +281,11 @@ def test_filter_sources_to_text_title_keyword_match():
     # When there is no URL/host in text, title keywords can trigger a match.
     text = "An insightful breakdown of value investing methods for beginners."
     srcs = [
-        {"type": "web", "display": "Value Investing Methods for Beginners", "href": None},
+        {
+            "type": "web",
+            "display": "Value Investing Methods for Beginners",
+            "href": None,
+        },
         {"type": "web", "display": "Unrelated Title", "href": None},
     ]
     kept = citation._filter_sources_to_text(text, srcs, keep_docs_if_present=False)
@@ -244,22 +297,28 @@ def test_filter_sources_to_text_title_keyword_match():
 # _had_rag_or_tools
 # ----------------------------
 
+
 def test_had_rag_or_tools_true_and_false():
     assert citation._had_rag_or_tools([]) is False
     # Placeholder model source should NOT count
-    assert citation._had_rag_or_tools(
-        [{"type": "model", "display": "Model answer (no tools used)"}]
-    ) is False
+    assert (
+        citation._had_rag_or_tools(
+            [{"type": "model", "display": "Model answer (no tools used)"}]
+        )
+        is False
+    )
     # Real web/tool/doc/book should count
-    assert citation._had_rag_or_tools(
-        [{"type": "web", "display": "https://example.com"}]
-    ) is True
-    assert citation._had_rag_or_tools(
-        [{"type": "tool", "display": "🔧 web_search"}]
-    ) is True
-    assert citation._had_rag_or_tools(
-        [{"type": "doc", "display": "Internal Doc"}]
-    ) is True
-    assert citation._had_rag_or_tools(
-        [{"type": "book", "display": "Some Book"}]
-    ) is True
+    assert (
+        citation._had_rag_or_tools([{"type": "web", "display": "https://example.com"}])
+        is True
+    )
+    assert (
+        citation._had_rag_or_tools([{"type": "tool", "display": "🔧 web_search"}])
+        is True
+    )
+    assert (
+        citation._had_rag_or_tools([{"type": "doc", "display": "Internal Doc"}]) is True
+    )
+    assert (
+        citation._had_rag_or_tools([{"type": "book", "display": "Some Book"}]) is True
+    )

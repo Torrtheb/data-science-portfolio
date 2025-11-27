@@ -25,6 +25,7 @@ from langchain_core.retrievers import BaseRetriever
 from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.runnables import RunnableConfig
 from qdrant_client import QdrantClient
+
 try:
     from langchain_qdrant import Qdrant as LCQdrant
 except Exception:
@@ -125,14 +126,15 @@ def get_embeddings() -> OpenAIEmbeddings:
             model_name = getattr(settings, "embedding_model", None)
         except Exception:
             pass
-        model_name = model_name or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+        model_name = model_name or os.getenv(
+            "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
+        )
         _embeddings_singleton = OpenAIEmbeddings(
             model=model_name,
             api_key=_resolve_openai_key(),
         )
         logger.info("Embeddings ready | model=%s", model_name)
     return _embeddings_singleton
-
 
 
 def get_llm() -> BaseChatModel:
@@ -602,7 +604,9 @@ def build_vectorstore_qdrant(
     qd = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
     content_key, meta_key = _guess_qdrant_payload_keys(qd, collection_name)
-    rag_log.info("Qdrant payload keys | content='%s' metadata='%s'", content_key, meta_key)
+    rag_log.info(
+        "Qdrant payload keys | content='%s' metadata='%s'", content_key, meta_key
+    )
 
     vs = LCQdrant(
         client=qd,
@@ -613,7 +617,6 @@ def build_vectorstore_qdrant(
     )
     rag_log.info("Qdrant vector store ready | collection='%s'", collection_name)
     return vs
-
 
 
 def build_functions_agent(
@@ -686,6 +689,7 @@ class HybridRetriever(BaseRetriever):
     Safe on empty vector stores: if no documents are present, BM25 is disabled
     and only dense leg (if any) contributes.
     """
+
     vs: Any
     k: int = TOP_K
 
@@ -855,6 +859,7 @@ class HybridRetriever(BaseRetriever):
             return filtered[: self.k]
         return docs[: self.k]
 
+
 def _estimate_collection_size(vs) -> int | None:
     """
     Best-effort count of vectors stored in a vector store.
@@ -996,15 +1001,20 @@ def build_retriever(
             config = RunnableConfig(
                 callbacks=run_manager.get_child() if run_manager else None
             )
+
             # Prefer async calls when retrievers expose them; otherwise fall back.
             async def _call(r, q):
                 if hasattr(r, "ainvoke"):
                     return await r.ainvoke(q, config=config)
                 if hasattr(r, "aget_relevant_documents"):
-                    return await r.aget_relevant_documents(q, callbacks=config.get("callbacks"))
+                    return await r.aget_relevant_documents(
+                        q, callbacks=config.get("callbacks")
+                    )
                 return r.invoke(q, config=config) if hasattr(r, "invoke") else []
 
-            a, b = await asyncio.gather(_call(self.ccr, query), _call(self.hybrid, query))
+            a, b = await asyncio.gather(
+                _call(self.ccr, query), _call(self.hybrid, query)
+            )
 
             seen: set[tuple] = set()
             out: List[Document] = []
@@ -1430,6 +1440,7 @@ def get_vectorstore(*, force_rebuild: bool = False):
 
     _vectorstore_singleton = vs
     return vs
+
 
 def get_retriever(
     *, mode: str = "hybrid", k: int = TOP_K, force_rebuild: bool = False

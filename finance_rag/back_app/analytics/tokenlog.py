@@ -166,7 +166,6 @@ class _TokenTally(BaseCallbackHandler):
       - ''total_tokens'' (falls back to ''prompt + completion'')
     """
 
-
     def __init__(self) -> None:
         """Initialize counters and seen-chain tracking."""
         self.prompt_tokens = 0
@@ -258,6 +257,7 @@ class _UsageBag(TypedDict, total=False):
         session_id (str): Optional session identifier to forward to analytics.
         turn_id (int): Optional turn identifier for tool telemetry correlation.
     """
+
     model: str
     callbacks: list
     prompt_tokens: int

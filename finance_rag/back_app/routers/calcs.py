@@ -26,6 +26,7 @@ class ToolSource(TypedDict):
         title (str): Human-readable display title.
         meta (dict): Extra metadata (currently empty).
     """
+
     type: str
     name: str
     title: str

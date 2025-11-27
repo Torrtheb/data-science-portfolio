@@ -11,6 +11,7 @@ import pytest
 
 # ------------------------ helpers: fresh module per test ------------------------
 
+
 def _reload_db_with_tmpfile(tmp_path):
     """
     Bind back_app.core.db to a brand-new SQLite file DB and init tables.
@@ -48,8 +49,8 @@ def _reload_db_with_tmpfile(tmp_path):
     return db_mod, db_url
 
 
-
 # ------------------------------ fixtures ----------------------------------------
+
 
 @pytest.fixture
 def dbm(tmp_path):
@@ -75,6 +76,7 @@ def session(dbm):
 
 # ------------------------------ tests -------------------------------------------
 
+
 def test_engine_uses_sqlite_file_and_dir_created(tmp_path):
     db_mod, db_url = _reload_db_with_tmpfile(tmp_path)
     # Directory should exist (created by _ensure_sqlite_dir)
@@ -92,7 +94,8 @@ def test_init_db_creates_tables(dbm):
     # introspect via connection
     with dbm.engine.connect() as conn:
         tables = {
-            row[0] for row in conn.exec_driver_sql(
+            row[0]
+            for row in conn.exec_driver_sql(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
@@ -168,10 +171,7 @@ def test_append_message_creates_and_bumps_session(dbm, session):
 
 def test_list_messages_returns_in_ascending_order_and_limit(dbm, session):
     sid = dbm.get_or_create_session(session)
-    ids = [
-        dbm.append_message(session, sid, "user", f"m{i}", None)
-        for i in range(5)
-    ]
+    ids = [dbm.append_message(session, sid, "user", f"m{i}", None) for i in range(5)]
     out = dbm.list_messages(session, sid)
     got_ids = [m.id for m in out]
     assert got_ids == sorted(ids)

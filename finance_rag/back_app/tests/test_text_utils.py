@@ -12,6 +12,7 @@ import back_app.utils.text as text
 # URL sanitation & link helpers
 # -----------------------------
 
+
 def test_url_sanitize_strict_basic_and_www():
     messy = "  www.example.com\u200b/path \n"
     out = text._url_sanitize_strict(messy)
@@ -55,6 +56,7 @@ def test_normalize_links_converts_latex_and_autolinks_outside_math():
 # Generic coercion & names
 # -----------------------------
 
+
 def test_coerce_strings_various():
     obj = {
         1: ("a", slice(0, 1, None), ["x", 2]),
@@ -70,7 +72,11 @@ def test_coerce_strings_various():
 
 
 def test_sanitize_and_unique_safe_names():
-    tools = [SimpleNamespace(name="My Tool!!  "), SimpleNamespace(name="My Tool!!  "), SimpleNamespace(name="")]
+    tools = [
+        SimpleNamespace(name="My Tool!!  "),
+        SimpleNamespace(name="My Tool!!  "),
+        SimpleNamespace(name=""),
+    ]
     text._unique_safe_names(tools)
     names = [t.name for t in tools]
     # first sanitized base
@@ -96,6 +102,7 @@ def test_clean_title_trims_and_collapses():
 # Provider/date utilities
 # -----------------------------
 
+
 def test_prettify_provider_mapping_and_passthrough():
     assert text._prettify_provider("Yahoo Finance") == "Yahoo"
     assert text._prettify_provider("Bloomberg.com") == "Bloomberg"
@@ -107,9 +114,9 @@ def test_prettify_provider_mapping_and_passthrough():
     "inp,expect",
     [
         ("2025-01-02T12:34:56Z", "2025-01-02"),
-        (1_700_000_000, "2023-11-14"),            # epoch seconds
-        (1_700_000_000_000, "2023-11-14"),        # epoch ms
-        ("1700000000", "2023-11-14"),             # numeric string
+        (1_700_000_000, "2023-11-14"),  # epoch seconds
+        (1_700_000_000_000, "2023-11-14"),  # epoch ms
+        ("1700000000", "2023-11-14"),  # numeric string
         ("nope", None),
         (None, None),
     ],
@@ -128,6 +135,7 @@ def test_pretty_date_portable_formatting():
 # Math/markdown healing
 # -----------------------------
 
+
 def test_heal_inline_math_delimiters_outside_code_only():
     # Zero-width after backslash (ZWSP)
     broken = "before \\\u200b( x + y \\\u200b) middle ''' code \\ \u200b( z ) ''' after"
@@ -142,7 +150,6 @@ def test_heal_inline_math_delimiters_outside_code_only():
     code_segment = parts[1]
     assert "\u200b" in code_segment
     assert "code \\ \u200b( z )" in code_segment
-
 
 
 def test_break_currency_pairs_rewrites_all_but_last():
@@ -181,13 +188,14 @@ def test_escape_dollars_outside_math_and_code():
 # Non-math text heuristic
 # -----------------------------
 
+
 @pytest.mark.parametrize(
     "s,expected",
     [
-        ("Visit https://example.com now", True),      # URL → text
-        ("[link](https://x.y)", True),                 # markdown link → text
-        ("a b c d e", True),                           # 5+ words, no math ops/cmds
-        (r"\alpha + \beta = \gamma", False),           # LaTeX commands/operators
+        ("Visit https://example.com now", True),  # URL → text
+        ("[link](https://x.y)", True),  # markdown link → text
+        ("a b c d e", True),  # 5+ words, no math ops/cmds
+        (r"\alpha + \beta = \gamma", False),  # LaTeX commands/operators
         ("", False),
     ],
 )
@@ -198,6 +206,7 @@ def test_looks_non_math_text(s, expected):
 # -----------------------------
 # End-to-end postprocess smoke
 # -----------------------------
+
 
 def test_postprocess_markdown_integration():
     raw = (
@@ -219,7 +228,11 @@ def test_postprocess_markdown_integration():
 
     # bare url linked: be flexible about optional trailing period and angle-bracketed targets
     import re
-    assert re.search(r"\[https://b\.com\.?\]\(<https://b\.com\.?>\)", out) or "https://b.com" in out
+
+    assert (
+        re.search(r"\[https://b\.com\.?\]\(<https://b\.com\.?>\)", out)
+        or "https://b.com" in out
+    )
 
     # math preserved and % escaped/normalized
     assert r"\(\frac{a}{b}\%\)" in out

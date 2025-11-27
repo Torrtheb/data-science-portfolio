@@ -274,6 +274,7 @@ class _WBExactArgs(BaseModel):
             - True → use constant 2021 international $ (NY.GDP.PCAP.PP.KD).
             - False → allow current PPP series (NY.GDP.PCAP.PP.CD).
     """
+
     country_id: str = Field(
         ..., description="Country name or code, e.g., 'Albania' or 'ALB'"
     )

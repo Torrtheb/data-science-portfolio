@@ -16,24 +16,34 @@ def _isolate_globals(monkeypatch):
     - Provide a tiny, predictable TOOLS list
     """
     import back_app.main as main
+
     monkeypatch.setattr(main, "retriever", None, raising=True)
+
     # Minimal tool objects with .name
     class DummyTool:
-        def __init__(self, name): self.name = name
+        def __init__(self, name):
+            self.name = name
+
     monkeypatch.setattr(main, "TOOLS", [DummyTool("foo")], raising=True)
 
 
 # ---------- _is_offtopic_reply ----------
 
+
 def test_is_offtopic_reply():
     import back_app.main as main
+
     assert main._is_offtopic_reply(main._GUARD_REPLY) is True
-    assert main._is_offtopic_reply("This looks out of scope for a finance-only assistant") is True
+    assert (
+        main._is_offtopic_reply("This looks out of scope for a finance-only assistant")
+        is True
+    )
     assert main._is_offtopic_reply("Totally normal helpful market answer") is False
     assert main._is_offtopic_reply("") is False
 
 
 # ---------- _approx_count_tokens + _approx_cost_usd ----------
+
 
 def test_approx_count_tokens_uses_tiktoken_when_present(monkeypatch):
     """
@@ -64,7 +74,7 @@ def test_approx_count_tokens_uses_tiktoken_when_present(monkeypatch):
     pt, ct = main._approx_count_tokens(
         model="gpt-4o-mini",
         prompt_messages=[{"role": "user", "content": "Hello there"}],
-        completion_text="Hi!"
+        completion_text="Hi!",
     )
     # With the fake encoder, both should be non-zero and deterministic
     assert pt > 0
@@ -91,6 +101,7 @@ def test_approx_cost_usd_reads_PRICING(monkeypatch):
 
 
 # ---------- _has_useful_docs ----------
+
 
 def test_has_useful_docs_true_when_score_high(monkeypatch):
     import back_app.main as main
@@ -127,11 +138,13 @@ def test_has_useful_docs_false_when_score_low(monkeypatch):
 
 # ---------- _collect_tools ----------
 
+
 def test_collect_tools_merges_local_and_mcp(monkeypatch):
     import back_app.main as main
 
     class DummyTool:
-        def __init__(self, name): self.name = name
+        def __init__(self, name):
+            self.name = name
 
     # Replace build_langchain_tools to return two extra tools (one duplicate name)
     def fake_build():
@@ -157,8 +170,8 @@ def test_collect_tools_merges_local_and_mcp(monkeypatch):
     assert any(k.startswith("foo_") for k in tmap.keys())
 
 
-
 # ---------- _build_sources_from_steps_and_docs ----------
+
 
 @pytest.mark.anyio
 async def test_build_sources_appends_finnhub_when_stock_tool_used(monkeypatch):
@@ -180,7 +193,9 @@ async def test_build_sources_appends_world_bank_when_world_bank_tool_used(monkey
     import back_app.main as main
 
     monkeypatch.setattr(main, "tools_trace_to_sources", lambda traces: [], raising=True)
-    action = SimpleNamespace(tool="world_bank.get_indicator", tool_input={"code": "NY.GDP.MKTP.CD"})
+    action = SimpleNamespace(
+        tool="world_bank.get_indicator", tool_input={"code": "NY.GDP.MKTP.CD"}
+    )
     steps = [(action, "ok")]
 
     out = await main._build_sources_from_steps_and_docs(steps, "gdp?")
@@ -204,7 +219,10 @@ async def test_build_sources_uses_confident_docs_when_no_tools(monkeypatch):
 
     # Pass-through confidence filter
     from back_app import main as main_mod
-    monkeypatch.setattr(main_mod, "rag_filter_confident", lambda docs: docs, raising=False)
+
+    monkeypatch.setattr(
+        main_mod, "rag_filter_confident", lambda docs: docs, raising=False
+    )
 
     out = await main._build_sources_from_steps_and_docs([], "docs?")
 
@@ -213,12 +231,15 @@ async def test_build_sources_uses_confident_docs_when_no_tools(monkeypatch):
     assert "https://example.com/a" in links
     assert "https://example.com/b" in links
 
+
 @pytest.mark.anyio
 async def test_call_agent_handles_ainvoke(monkeypatch):
     import back_app.main as main
 
     class AgentAInvoke:
-        def __init__(self): self.seen = None
+        def __init__(self):
+            self.seen = None
+
         async def ainvoke(self, inputs, config=None):
             self.seen = (inputs, config)
             return {"output": "ok2", "intermediate_steps": []}
@@ -230,6 +251,7 @@ async def test_call_agent_handles_ainvoke(monkeypatch):
 
 
 # ---------- SSETokenHandler ----------
+
 
 @pytest.mark.anyio
 async def test_sse_token_handler_basic_flow():

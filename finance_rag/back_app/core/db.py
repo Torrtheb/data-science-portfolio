@@ -38,7 +38,7 @@ except Exception:
 if os.getenv("DATABASE_URL"):
     DATABASE_URL = os.getenv("DATABASE_URL")
 else:
-    if os.getenv("K_SERVICE"): 
+    if os.getenv("K_SERVICE"):
         DEFAULT_SQLITE_PATH = "/tmp/finassist.db"
     else:
         DEFAULT_SQLITE_PATH = "./data/finassist.db"
@@ -65,6 +65,7 @@ def _ensure_sqlite_dir(db_url: str) -> None:
     else:
         return
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
 
 _ensure_sqlite_dir(DATABASE_URL)
 
@@ -122,6 +123,7 @@ class SessionModel(Base):
     Represents a conversation container. Messages reference a session via
     ''session_id''. Deleting a session cascades to its messages.
     """
+
     __tablename__ = "chat_sessions"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -140,6 +142,7 @@ class SessionModel(Base):
         passive_deletes=True,
     )
     __table_args__ = (Index("ix_chat_sessions_updated_at", "updated_at"),)
+
     def __repr__(self) -> str:
         return f"<SessionModel id={self.id!r} title={self.title!r}>"
 
@@ -150,6 +153,7 @@ class MessageModel(Base):
 
     Stores role, content, creation time, and optional serialized tool-call data.
     """
+
     __tablename__ = "chat_messages"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(
@@ -170,6 +174,7 @@ class MessageModel(Base):
     )
 
     __table_args__ = (Index("ix_chat_messages_session_id_id", "session_id", "id"),)
+
     def __repr__(self) -> str:
         return f"<MessageModel id={self.id} session_id={self.session_id!r} role={self.role!r}>"
 
