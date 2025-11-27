@@ -1,0 +1,53 @@
+{
+  "name": "finassist-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "next lint",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sentry/nextjs": "^10.5.0",
+    "@tailwindcss/forms": "^0.5.10",
+    "classnames": "^2.5.1",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.22",
+    "lightweight-charts": "^4.2.3",
+    "next": "^15.5.2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^10.1.0",
+    "recharts": "^2.15.4",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "swr": "^2.3.6",
+    "zo": "^0.0.2",
+    "zod": "^4.0.17"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/react": "^18.3.24",
+    "@types/react-dom": "^18.3.7",
+    "autoprefixer": "^10.4.21",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "^16.0.4",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.4.5",
+    "vercel": "^32.0.1"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "overrides": {
+    "http-proxy": "^1.18.1"
+  }
+}

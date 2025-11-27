@@ -1,0 +1,66 @@
+# Core dependencies for the Financial Advisor Hybrid RAG system
+fastapi>=0.111
+uvicorn[standard]>=0.27
+pydantic>=2.8
+pydantic-settings>=2.10
+sqlalchemy>=2.0.0
+loguru>=0.7
+
+# LangChain and AI dependencies
+# Pin to the 0.2.x line to avoid 1.x breaking changes (retrievers/agents moved)
+langchain==0.2.17
+langchain-openai==0.1.23
+langchain-community==0.2.17
+langchain-text-splitters==0.2.4
+openai>=1.40
+rank-bm25>=0.2.2
+
+# mcp 
+mcp>=1.13,<2
+world-bank-mcp-server>=0.1.0,<1
+mcp-streamablehttp-proxy>=0.2, <1
+
+# Document processing
+pypdf>=3.17.4
+pymupdf>=1.23.14
+unstructured>=0.14.0
+weasyprint>=65.0
+
+# Vector database
+qdrant-client>=1.9.0
+
+# Text processing
+tiktoken>=0.7
+
+# Environment and configuration
+python-dotenv>=1.0
+
+# HTTP and async
+httpx>=0.27
+aiofiles>=23.2.1
+
+# Data processing
+numpy>=1.26
+pandas>=2.2
+scipy>=1.13
+
+# Utilities
+python-multipart>=0.0.6
+typing-extensions>=4.8.0
+itsdangerous>=2.2
+
+# Development dependencies
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+black>=23.11.0
+flake8>=6.1.0
+
+# Security
+cryptography>=41.0.8
+
+# Deployment
+google-cloud-storage>=3.3
+langchain-qdrant>=0.1.1
+pycountry>=24.6
+rapidfuzz>=3.14.0
+python-dotenv>=1.0

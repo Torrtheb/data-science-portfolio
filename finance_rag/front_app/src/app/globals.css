@@ -1,0 +1,128 @@
+/* src/app/globals.css */
+@tailwind base;
+@tailwind components;
+@import "katex/dist/katex.min.css";
+@tailwind utilities;
+
+/* Put @apply rules inside a layer so Tailwind can process them safely */
+@layer base {
+  html, body, :root { height: 100%; }
+
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+}
+
+* { scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.2) transparent; }
+*::-webkit-scrollbar { height: 8px; width: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(0,0,0,.2); border-radius: 999px; }
+
+/* Remove number spinners (Chrome/Safari/Edge/Opera) */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+/* Remove number spinners (Firefox) */
+input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+/* Fix KaTeX rendering inside and outside Tailwind .prose blocks */
+.katex,
+.prose .katex {
+  font-size: 1em; /* keep inline math same as body text */
+}
+
+.katex-display,
+.prose .katex-display {
+  margin: 1em 0;
+  overflow-x: auto; /* let long formulas scroll horizontally */
+  overflow-y: hidden;
+}
+
+.katex-display > .katex,
+.prose .katex-display > .katex {
+  padding: 0.25em 0;
+}
+
+/* Optional: prevent clipping of long code/math lines */
+.markdown pre,
+.prose pre {
+  overflow-x: auto;
+}
+
+/* Chat/Markdown containers: keep paragraphs, don't shatter words */
+.prose, .chat-markdown {
+  white-space: normal;    
+  word-break: normal;  
+  overflow-wrap: anywhere; 
+  hyphens: auto;
+}
+
+/* Inherit the no-break policy inside prose */
+.prose * {
+  word-break: inherit;
+  overflow-wrap: inherit;
+  hyphens: inherit;
+}
+
+/* Keep code blocks literal (no wrapping) */
+.prose pre, .prose code,
+.chat-markdown pre, .chat-markdown code {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* Optional: tighten default prose margins to avoid huge gaps */
+.prose :where(p, ul, ol, pre, blockquote, table, h1, h2, h3, h4, h5, h6) {
+  margin-top: 0.6em;
+  margin-bottom: 0.6em;
+}
+
+/* Headings: a touch more space above than below (feel free to tweak) */
+.prose :where(h1, h2, h3, h4, h5, h6) { margin-top: 1em; margin-bottom: 0.5em; }
+
+/* Tables/long math: allow horizontal scroll, no vertical */
+.prose pre, .prose .katex-display { overflow-x: auto; overflow-y: hidden; }
+
+/* Tighter markdown inside bubbles */
+.chat-markdown :where(p, ul, ol, pre, blockquote, table, hr, h1, h2, h3, h4, h5, h6) {
+  margin-top: 0.25rem !important;
+  margin-bottom: 0.25rem !important;
+}
+
+/* Remove “dead air” at bubble edges */
+.chat-markdown > :first-child {
+  margin-top: 0 !important;
+}
+.chat-markdown > :last-child {
+  margin-bottom: 0 !important;
+}
+
+/* Kill accidental empty paragraphs/lis */
+.chat-markdown p:empty,
+.chat-markdown li:empty {
+  display: none !important;
+}
+
+/* Optional: slightly tighter lists */
+.chat-markdown ul,
+.chat-markdown ol {
+  padding-left: 1.1rem !important;
+}
+
+/* Highlight key headings (e.g., "Next steps") as callouts inside chat bubbles */
+.chat-markdown h2 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.25rem 0.5rem;
+  border-left: 3px solid rgba(37, 99, 235, 0.9); /* blue-600 */
+  background: rgba(239, 246, 255, 0.9);          /* blue-50 */
+  border-radius: 0.375rem;
+  color: #0f172a; /* slate-900 */
+}
