@@ -1,37 +1,37 @@
-# Data Science Portfolio
+# Data Science & AI Engineering Portfolio
 
-Welcome! I'm **Elizabeth Torrance**, a data science student with a passion for using data to solve real-world problems. I believe data has the power to drive better decisions, uncover hidden patterns, and tell impactful stories. This portfolio showcases a selection of my hands-on projects—ranging from machine learning models to visual analytics—using real-world datasets. Each project reflects my commitment to thoughtful analysis, clear communication, and continuous learning in the field of data science.
+Hi, I’m **Elizabeth Torrance** — a bilingual (EN/FR) data scientist and AI engineer who ships full-stack ML/AI products. I work end-to-end (EDA → modeling → APIs/frontends/agents) with an emphasis on explainability, reliability, and real users.
 
-
---
-
-## About Me
-
-- I am an aspiring Data Scientist with a strong foundation in Python, statistics, and machine learning. 
-- Background in mechanical engineering (Masters) and science (Bachelors, majors: physics and chemistry).
-- Focused on building explainable models, writing clean code, and elucidating actionable insights.  
+- 3 deployed apps: AI scheduling assistant, finance RAG chatbot, credit-risk evaluation.
+- Comfortable across Python/SQL, FastAPI/Next.js, LangChain/LangGraph, PyTorch/sklearn, Docker/Cloud Run.
+- Every project is reproducible and documented.
 
 ## Featured Projects
 
-Here are some projects that I have completed using data available to the public and Kaggle competitions. These projects demonstrate exploratory data analysis, statistical inference, feature engineering, model building and evaluation, and full web deployment (for the Home Credit Default Risk dataset). 
+| Project | Impact | Stack & Deployment | Live / Code |
+|---------|--------|--------------------|-------------|
+| AI Scheduling Assistant | Full-stack AI assistant for a small music studio that automates bookings, time-off, wallets, and email approvals via a LangGraph agent, with guarded SSE chat, retries, and JWT-based auth. | FastAPI, LangGraph, Postgres/pgvector, Next.js; Docker; Vercel + GCP | [Live](https://music-studio-rho.vercel.app) · [Code](./ai_assistant) |
+| Home Credit Default Risk | End-to-end credit-risk pipeline built around a tuned LightGBM model (~0.79 ROC-AUC on validation, ~0.787 on Kaggle test), with SHAP explanations and dual deployments (FastAPI API + Streamlit app). | LightGBM/CatBoost/Voting; FastAPI + Docker on Cloud Run; Streamlit app | [Code](./Home_Credit_Default/) |
+| Finance RAG Chatbot (FinAssist) | HFinance-only RAG assistant over curated investing texts and live market data, with strict citations, guardrails, financial calculators, and exportable chat histories (JSON/PDF/CSV). | FastAPI + LangChain agent, Qdrant, OpenAI, Next.js; Vercel + Cloud Run | [Live](https://front-app-nine.vercel.app/) · [Code](./finance_rag) |
+| Foundations — SQL | Mental-health survey analysis shows treatment effectiveness sharply reduces work interference; categorical drivers teased out for policy recommendations. | SQLite + pandas; joins/window functions; visuals | [Code](./SQL_mental_health_survey) |
+| Foundations — A/B Testing | Cookie Cats gate stays at level 30 (SRM flagged) and Promotion 1 chosen for a fast-food campaign via bootstrap + KS. | pandas; chi-square, t-tests, KS, bootstrap; visuals | [Code](./A_B_testing) |
 
-| Project | Description | Key Techniques & Tools |
-|---------|-------------|------------------------|
-| 🧮 [MNIST Digit Classifier (PyTorch + Lightning)](./deep_learning_mnist/) | Digit classification with an MLP using PyTorch and Lightning. Clean training pipeline with TensorBoard logging, optional cosine LR scheduler (and ablations to disable), reproducible loaders, GPU support (CUDA/MPS), data augmentation, and torchinfo summaries. | PyTorch, PyTorch Lightning, torchvision transforms, schedulers, Optuna (optional), torchinfo, TensorBoard |
-| 🏠 [Home Credit Default Risk — Streamlit App](./Home_Credit_Default/) | Credit-risk scoring using real loan-application data. Deployed a Streamlit web app so Home Credit employees can search an application ID and instantly see predicted default probability. | Streamlit, LightGBM, feature selection, SHAP interpretability |
-| 🚀 [Spaceship Titanic Survival Prediction](./Spaceship_Titanic/) | Kaggle challenge predicting passenger survival on a fictional interstellar voyage. Extensive feature engineering, handling of missing values, and model comparison. | scikit-learn pipeline, hist-gb & LightGBM, cross-validation, SHAP |
-| ❤️ [Stroke Prediction](./Stroke_Prediction/) | Binary classifier estimating stroke risk from demographic & lifestyle features. Comparison of logistic regression and balanced random forest models. | Logistic Regression, balanced random forest, class-imbalance handling, ROC-AUC, calibration curve |
-| 🧠 [Mental Health in Tech Survey Analysis](./Mental_Health_Survey/) | Exploratory, visualization-driven study of workplace mental-health factors in the tech industry. Highlights storytelling with data. | Pandas, Seaborn & Matplotlib, hypothesis testing |
+> 📂 Repos include modular code, environment files, and concise README files.
 
-> 📂 Each folder contains a Jupyter notebook (and/or Python scripts), clean data pipelines, key visuals, and a detailed README.
+## Technical Toolkit
 
-## Tools & Skills
+- **ML/Modeling:** scikit-learn, PyTorch, LightGBM, CatBoost, Optuna, SHAP  
+- **GenAI/Agents:** LangChain, LangGraph, RAG (Qdrant/BM25), OpenAI APIs, prompt chaining  
+- **Backend/MLOps:** FastAPI, Docker, Google Cloud Run, Vercel, Streamlit, PostgreSQL + pgvector  
+- **Data & Analytics:** Python, SQL, Pandas/NumPy, Matplotlib/Seaborn, Phik, statsmodels  
+- **Testing/Practices:** pytest, feature engineering, explainability, guardrails, streaming UX
 
-- **Languages:** Python, SQL
-- **Libraries:** Pandas, NumPy, scikit-learn, Matplotlib, Seaborn, PyTorch, PyTorch Lightning, torchvision
-- **Tools:** Jupyter Notebook, Git, Tableau, VS Code, Streamlit
-- **Specialties:** Data wrangling, EDA, machine learning, deep learning (computer vision & image processing), model interpretation, visualization, binary classification
+## What I’m Looking For
 
-# Let's Connect
-email: bethtorrance9@gmail.com
-[LinkedIn](https://www.linkedin.com/in/elizabeth-torrance-4076bb2a2/)
+Data Scientist, ML Engineer, or AI Engineer roles (intern/entry) where I can build and operate useful, data-driven products. Open to remote/hybrid.
+
+## Let’s Connect
+
+📧 **Email:** bethtorrance9@gmail.com  
+🔗 [**LinkedIn**](https://www.linkedin.com/in/elizabeth-torrance)  
+💻 [**GitHub**](https://github.com/Torrtheb)

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="160" height="48" viewBox="0 0 160 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Piano board (classic black/white, no tint) -->
+  <rect x="1" y="1" width="158" height="46" rx="8" fill="#ffffff" stroke="#0F172A" stroke-opacity="0.6"/>
+
+  <!-- White key dividers -->
+  <g stroke="#E5E7EB" stroke-width="1">
+    <path d="M20 1v46" />
+    <path d="M40 1v46" />
+    <path d="M60 1v46" />
+    <path d="M80 1v46" />
+    <path d="M100 1v46" />
+    <path d="M120 1v46" />
+    <path d="M140 1v46" />
+  </g>
+
+  <!-- Black keys -->
+  <g fill="#0F172A">
+    <rect x="13" y="1" width="10" height="26" rx="2"/>
+    <rect x="33" y="1" width="10" height="26" rx="2"/>
+    <rect x="73" y="1" width="10" height="26" rx="2"/>
+    <rect x="93" y="1" width="10" height="26" rx="2"/>
+    <rect x="113" y="1" width="10" height="26" rx="2"/>
+  </g>
+</svg>

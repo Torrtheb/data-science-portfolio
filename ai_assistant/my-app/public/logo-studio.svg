@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="72" height="72" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Simple black eighth note -->
+  <g fill="#0F172A">
+    <!-- Head -->
+    <ellipse cx="28" cy="50" rx="9" ry="7"/>
+    <!-- Stem -->
+    <rect x="34" y="14" width="4" height="28" rx="2"/>
+    <!-- Flag -->
+    <path d="M38 16c8 0 14 4 14 10 0 2-1 4-2.6 5.5-2.5-3.2-6.2-4.9-11.4-5.1V16Z"/>
+  </g>
+</svg>

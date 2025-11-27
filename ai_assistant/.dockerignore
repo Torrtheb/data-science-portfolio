@@ -1,0 +1,24 @@
+.git
+.gitignore
+.DS_Store
+.venv
+**/__pycache__/
+*.py[cod]
+tests/
+docs/
+.env*
+
+# Exclude frontend entirely from backend image builds
+my-app/
+
+# Large/temporary artifacts in project root
+backup.sql.gz
+.uv_cache/
+__pycache__/
+
+# Common Node/Next build outputs (in case frontend remains in context later)
+node_modules/
+.next/
+.turbo/
+.vercel/
+dist/

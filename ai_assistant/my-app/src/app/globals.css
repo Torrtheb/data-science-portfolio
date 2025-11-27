@@ -1,0 +1,116 @@
+/* === src/app/globals.css (Tailwind v4) === */
+
+/* v4: just import Tailwind */
+@import "tailwindcss";
+
+/* -------- Design tokens (RGB so they’re easy to reuse) -------- */
+:root {
+  --bg: 255 255 255;        /* page background */
+  --fg: 23 23 23;           /* main text */
+  --muted: 113 113 122;     /* zinc-500 */
+  --border: 228 228 231;    /* zinc-200 */
+  --card: 255 255 255;      /* surfaces / cards */
+  /* brand colors for the studio */
+  --brand: 37 99 235;       /* blue-600 */
+  --accent: 16 185 129;     /* emerald-500 (green) */
+  --brand-soft: 239 246 255;/* blue-50 */
+}
+
+.dark {
+  --bg: 10 10 10;           /* #0a0a0a */
+  --fg: 237 237 237;        /* #ededed */
+  --muted: 161 161 170;     /* zinc-400 */
+  --border: 63 63 70;       /* zinc-700 */
+  --card: 24 24 27;         /* zinc-900-ish surface */
+  --brand: 96 165 250;      /* blue-400 */
+  --accent: 52 211 153;     /* emerald-400 */
+  --brand-soft: 18 22 28;   /* subtle dark-blue surface */
+}
+
+/* Let the UA choose good defaults for form controls, etc. */
+html { color-scheme: light dark; }
+
+/* Base page styles using the tokens */
+body {
+  background-color: rgb(var(--bg));
+  color: rgb(var(--fg));
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+/* Normalize borders across the app */
+* { border-color: rgb(var(--border)); }
+
+/* Make common light surfaces readable in dark without touching every file */
+.dark .bg-white,
+.dark .bg-gray-50 { background-color: rgb(var(--card)) !important; }
+.dark .text-gray-700 { color: rgb(209 213 219) !important; } /* gray-300 */
+.dark .text-gray-600 { color: rgb(212 212 216) !important; } /* zinc-300 */
+.dark .text-gray-500 { color: rgb(161 161 170) !important; } /* zinc-400 */
+.dark .border-gray-200,
+.dark .border-gray-300 { border-color: rgb(var(--border)) !important; }
+
+/* Optional utility: a clean “card” surface */
+.card {
+  border-radius: 0.75rem;              /* rounded-xl */
+  border: 1px solid rgb(var(--border));
+  background-color: rgb(var(--card));
+}
+
+/* A soft brand banner utility (optional) */
+.brand-banner {
+  background: linear-gradient(135deg,
+    rgba(var(--brand), 0.10),
+    rgba(var(--accent), 0.10)
+  );
+}
+
+/* ---------- React Big Calendar – dark mode polish ---------- */
+.dark .rbc-calendar { background-color: rgb(var(--card)); color: rgb(var(--fg)); }
+.dark .rbc-time-header,
+.dark .rbc-time-content,
+.dark .rbc-month-view,
+.dark .rbc-agenda-view { border-color: rgb(var(--border)); }
+
+.dark .rbc-time-slot,
+.dark .rbc-timeslot-group,
+.dark .rbc-month-row,
+.dark .rbc-day-bg,
+.dark .rbc-time-header-cell,
+.dark .rbc-row-bg { border-color: rgb(var(--border)); }
+
+.dark .rbc-off-range-bg { background: rgba(255,255,255,0.03); }
+.dark .rbc-today { background: rgba(59,130,246,0.10); } /* subtle blue */
+.dark .rbc-event { color: #fff; } /* keep events readable */
+
+.dark .rbc-agenda-date-cell,
+.dark .rbc-agenda-time-cell,
+.dark .rbc-agenda-event-cell { border-color: rgb(var(--border)); }
+
+/* Buttons/inputs hover in dark */
+.dark button:hover { background-color: rgba(255,255,255,0.04); }
+
+/* ---------- React Big Calendar – fix white gutter ---------- */
+/* remove right gutter so events span full width */
+.rbc-day-slot .rbc-events-container,
+.rbc-allday-cell .rbc-events-container {
+  margin-right: 0 !important;
+}
+
+/* Make sure events calculate width including any outlines */
+.rbc-event {
+  box-sizing: border-box;
+  padding: 4px 10px; /* larger left/right padding for nicer spacing */
+  border-radius: 8px;
+  white-space: normal; /* allow wrapping to avoid overflow */
+}
+
+/* Availability events: use inset shadow instead of border so they remain full width */
+.rbc-event.rbc-availability {
+  border: none !important;
+  box-shadow: inset 0 0 0 1px #60a5fa;
+}
+
+/* Hide scrollbars for horizontal nav scrollers */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

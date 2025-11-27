@@ -1,0 +1,94 @@
+# Python
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+env/
+venv/
+.python-version
+*.egg-info/
+aieng_3.egg-info/
+*.so
+.ipynb_checkpoints/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+
+# Node / Next.js
+**/node_modules/
+**/.turbo/
+**/.next/
+**/.pnp.*
+**/.cache/
+**/dist/
+**/build/
+**/out/
+**/*.tsbuildinfo
+my-app/.next/
+my-app/.turbo/
+my-app/out/
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+my-app/.env
+my-app/.env.*
+.env.*.local
+.envrc
+*.pem
+*.key
+*.crt
+*.p12
+.npmrc
+
+# Data / artifacts
+*.db
+*.db-*
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+backup.sql.gz
+env.yaml
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Project-specific files to keep local
+backend/data/
+backend/sql/
+needed_ids.txt
+extract_ids.awk
+extract_and_seed.py
+cloudbuild.docker.yaml
+env.yaml
+backup.sql.gz
+.vercel
+
+# CI / repo metadata
+.github/workflows/
+
+# OS/Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Debug helpers & local docs
+conftest.py
+debug_booking.py
+debug_e2e_wallet_check.py
+debug_bundle_agent_dryrun.py
+backend/AGENT.md
+backend/README.md
+my-app/README.md

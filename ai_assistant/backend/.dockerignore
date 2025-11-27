@@ -1,0 +1,10 @@
+.git
+.gitignore
+.DS_Store
+.venv
+**/__pycache__/
+*.py[cod]
+tests/
+docs/
+.env*
+my-app/
