@@ -1356,9 +1356,18 @@ class FeatureExtractor:
             embeddings: (batch_size, embedding_dim) numpy array.
         """
         # Convert to tensors with the same preprocessing as ImageNet training
-        tensors = torch.stack(
-            [self.preprocess(Image.fromarray(img)) for img in images]
-        ).to(self.device)
+        processed = []
+        for img in images:
+            arr = np.asarray(img)
+            if arr.dtype != np.uint8:
+                max_val = float(arr.max()) if arr.size > 0 else 1.0
+                if max_val <= 1.0 + 1e-6:
+                    arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+                else:
+                    arr = np.clip(arr, 0, 255).astype(np.uint8)
+            pil_img = Image.fromarray(arr)
+            processed.append(self.preprocess(pil_img))
+        tensors = torch.stack(processed).to(self.device)
 
         feats = self.model(tensors)  # (B, 2048)
         return feats.cpu().numpy()
@@ -1403,7 +1412,7 @@ def extract_class_embeddings(
     ds,
     label_index: dict,
     extractor: FeatureExtractor,
-    samples_per_class: int = 10,
+    samples_per_class: int = 5,
     seed: int = 42,
 ):
     """
