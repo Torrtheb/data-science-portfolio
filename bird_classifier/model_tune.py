@@ -13,6 +13,8 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+
+from fewshot import apply_bbox_crop_optimized
 from torchvision import models, transforms
 
 try:
@@ -159,65 +161,6 @@ def split_label_index_train_val_test(
     )
 
 
-def resolve_bbox_xywh_or_xyxy(ds, idx: int) -> Optional[Tuple[float, float, float, float]]:
-    """Return pixel-space (x1, y1, x2, y2), clipped to image bounds.
-
-    Tries to handle:
-      - normalized xyxy (0..1)
-      - xywh
-      - xyxy
-    """
-    try:
-        img = ds["images"][idx].numpy()
-        h, w = img.shape[:2]
-        box = ds["boxes"][idx].numpy().astype(float).squeeze()
-    except Exception:
-        return None
-
-    if box.shape[-1] != 4:
-        return None
-
-    x1, y1, x2, y2 = box
-
-    # normalized xyxy
-    if 0 <= x1 <= 1 and 0 <= y1 <= 1 and 0 <= x2 <= 1 and 0 <= y2 <= 1:
-        x1, y1, x2, y2 = x1 * w, y1 * h, x2 * w, y2 * h
-    else:
-        # xywh
-        width, height = x2, y2
-        if width > 0 and height > 0 and x1 + width <= w + 1e-3 and y1 + height <= h + 1e-3:
-            x2 = x1 + width
-            y2 = y1 + height
-
-    x1, y1 = max(0.0, float(x1)), max(0.0, float(y1))
-    x2, y2 = min(float(w), float(x2)), min(float(h), float(y2))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return x1, y1, x2, y2
-
-
-def apply_bbox_crop(img: np.ndarray, ds, idx: int, padding_ratio: float = 0.15) -> np.ndarray:
-    """Crop to the DeepLake bbox (+padding). If missing/invalid, returns original."""
-    bbox = resolve_bbox_xywh_or_xyxy(ds, idx)
-    if bbox is None:
-        return img
-
-    h, w = img.shape[:2]
-    x1, y1, x2, y2 = bbox
-    x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
-    box_w, box_h = x2i - x1i, y2i - y1i
-    pad_x = int(box_w * padding_ratio)
-    pad_y = int(box_h * padding_ratio)
-
-    x1i = max(0, x1i - pad_x)
-    y1i = max(0, y1i - pad_y)
-    x2i = min(w, x2i + pad_x)
-    y2i = min(h, y2i + pad_y)
-    if x2i <= x1i or y2i <= y1i:
-        return img
-    return img[y1i:y2i, x1i:x2i]
-
-
 class DeepLakeEffNetDataset(Dataset):
     """DeepLake dataset wrapper for EfficientNet-B4 training/eval.
 
@@ -265,7 +208,8 @@ class DeepLakeEffNetDataset(Dataset):
         sample = self.ds[idx]
         img = sample["images"].numpy()
         if self.preprocess_mode == "bbox_crop":
-            img = apply_bbox_crop(img, self.ds, idx, padding_ratio=self.bbox_padding_ratio)
+            box = sample["boxes"].numpy()
+            img = apply_bbox_crop_optimized(img, box, padding_ratio=self.bbox_padding_ratio)
         x = self.tf(Image.fromarray(img))
         return x, int(self.y[i])
 
