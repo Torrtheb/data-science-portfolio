@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Data files (too large for GitHub)
+data/
+*.npz
+*.npy
+
+# OS files
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# UV lock (optional - you may want to keep this)
+# uv.lock
