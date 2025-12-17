@@ -1,0 +1,7 @@
+# Minimal requirements for Colab (torch is pre-installed)
+numpy
+pandas
+matplotlib
+scikit-learn
+pillow
+tqdm
