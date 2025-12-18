@@ -304,7 +304,7 @@ def show_duplicate_groups(
         header = "CONSISTENT LABELS (same pHash, same label)"
     elif group_type == "inconsistent":
         groups_to_show = inconsistent_groups
-        header = "⚠️ INCONSISTENT LABELS (same pHash, different labels)"
+        header = "INCONSISTENT LABELS (same pHash, different labels)"
     else:
         groups_to_show = consistent_groups + inconsistent_groups
         header = "ALL GROUPS"

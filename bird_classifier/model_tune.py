@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Tuple, Optional, Any, Callable
+from typing import Dict, List, Tuple, Optional, Any, Callable, Mapping
 from pathlib import Path
 import json
 import os
@@ -75,6 +75,8 @@ BASELINE_CONFIG = dict(
     freeze_bn_head=True,
     freeze_bn_finetune=True,
     augmentation="none",
+    augmentation_params=None,
+    resume_head_ckpt=None,
     bbox_padding_ratio=0.15,
     pad_to_square=True,
     cache_dir=None,
@@ -478,6 +480,149 @@ def get_augmentation(name: str) -> Optional[A.Compose]:
         raise ValueError(f"Unknown augmentation: {name}. Available: {list(AUGMENTATION_REGISTRY.keys())}")
     return AUGMENTATION_REGISTRY[name]()
 
+class BackgroundSubtract(A.ImageOnlyTransform):
+    def __init__(
+        self,
+        *,
+        sigma: float = 3.0,
+        strength: float = 0.8,
+        always_apply: bool = False,
+        p: float = 0.5,
+    ):
+        super().__init__(always_apply=always_apply, p=p)
+        self.sigma = float(sigma)
+        self.strength = float(strength)
+
+    def apply(self, img: np.ndarray, **params) -> np.ndarray:
+        sigma = max(self.sigma, 0.0)
+        if sigma <= 0:
+            return img
+
+        ksize = int(2 * round(3 * sigma) + 1)
+        if ksize % 2 == 0:
+            ksize += 1
+        ksize = max(ksize, 3)
+
+        blurred = cv2.GaussianBlur(img, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
+        out = img.astype(np.float32) - self.strength * blurred.astype(np.float32) + 128.0
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
+    """Build a parameterized augmentation recipe (Optuna-friendly)."""
+    if not params:
+        return None
+
+    def _p(key: str, default: float = 0.0) -> float:
+        try:
+            return float(params.get(key, default) or 0.0)
+        except Exception:
+            return default
+
+    ops: List[Any] = []
+
+    p_flip = _p("p_flip", 0.0)
+    if p_flip > 0:
+        ops.append(A.HorizontalFlip(p=min(max(p_flip, 0.0), 1.0)))
+
+    p_affine = _p("p_affine", 0.0)
+    if p_affine > 0:
+        shift_limit = float(params.get("shift_limit", 0.0))
+        scale_limit = float(params.get("scale_limit", 0.0))
+        rotate_limit = float(params.get("rotate_limit", 0.0))
+        ops.append(
+            A.ShiftScaleRotate(
+                shift_limit=shift_limit,
+                scale_limit=scale_limit,
+                rotate_limit=rotate_limit,
+                border_mode=cv2.BORDER_REFLECT_101,
+                p=min(max(p_affine, 0.0), 1.0),
+            )
+        )
+
+    p_color = _p("p_color", 0.0)
+    if p_color > 0:
+        brightness = float(params.get("brightness", 0.0))
+        contrast = float(params.get("contrast", 0.0))
+        saturation = float(params.get("saturation", 0.0))
+        hue = float(params.get("hue", 0.0))
+        ops.append(
+            A.ColorJitter(
+                brightness=brightness,
+                contrast=contrast,
+                saturation=saturation,
+                hue=hue,
+                p=min(max(p_color, 0.0), 1.0),
+            )
+        )
+
+    p_clahe = _p("p_clahe", 0.0)
+    if p_clahe > 0:
+        clip_limit = float(params.get("clahe_clip_limit", 2.0))
+        tile_grid_size = int(params.get("clahe_tile_grid_size", 8))
+        ops.append(
+            A.CLAHE(
+                clip_limit=clip_limit,
+                tile_grid_size=(tile_grid_size, tile_grid_size),
+                p=min(max(p_clahe, 0.0), 1.0),
+            )
+        )
+
+    p_bgsub = _p("p_bg_subtract", 0.0)
+    if p_bgsub > 0:
+        sigma = float(params.get("bg_sigma", 3.0))
+        strength = float(params.get("bg_strength", 0.8))
+        ops.append(
+            BackgroundSubtract(
+                sigma=sigma,
+                strength=strength,
+                p=min(max(p_bgsub, 0.0), 1.0),
+            )
+        )
+
+    p_blur = _p("p_blur", 0.0)
+    if p_blur > 0:
+        blur_max = int(params.get("blur_max", 5))
+        blur_max = max(3, blur_max)
+        if blur_max % 2 == 0:
+            blur_max += 1
+        ops.append(A.GaussianBlur(blur_limit=(3, blur_max), p=min(max(p_blur, 0.0), 1.0)))
+
+    p_noise = _p("p_noise", 0.0)
+    if p_noise > 0:
+        std_max = float(params.get("noise_std_max", 20.0))
+        std_max = max(1.0, std_max)
+        ops.append(A.GaussNoise(std_range=(0.0, std_max), p=min(max(p_noise, 0.0), 1.0)))
+
+    p_dropout = _p("p_dropout", 0.0)
+    if p_dropout > 0:
+        holes_max = int(params.get("dropout_holes_max", 4))
+        hole_min = float(params.get("dropout_hole_min", 0.05))
+        hole_max = float(params.get("dropout_hole_max", 0.15))
+        ops.append(
+            A.CoarseDropout(
+                num_holes_range=(1, max(1, holes_max)),
+                hole_height_range=(hole_min, hole_max),
+                hole_width_range=(hole_min, hole_max),
+                p=min(max(p_dropout, 0.0), 1.0),
+            )
+        )
+
+    if not ops:
+        return None
+    return A.Compose(ops)
+
+
+def resolve_train_augmentation(
+    augmentation: str,
+    augmentation_params: Mapping[str, Any] | None = None,
+) -> Optional[A.Compose]:
+    if augmentation in {None, "none"}:
+        return None
+    if augmentation == "recipe":
+        return build_recipe_augmentation(augmentation_params or {})
+    return get_augmentation(augmentation)
+
 
 @register_augmentation("basic")
 def aug_basic():
@@ -551,6 +696,7 @@ class BirdDataset(Dataset):
         bbox_padding_ratio: float = 0.15,
         pad_to_square: bool = True,
         augmentation: Optional[A.Compose] = None,
+        return_index: bool = False,
         cache_dir: Path | None = None,
         cache_version: str = "v1_uint8_rgb_pad_bbox",
     ):
@@ -562,6 +708,7 @@ class BirdDataset(Dataset):
         self.bbox_padding_ratio = float(bbox_padding_ratio)
         self.pad_to_square = bool(pad_to_square)
         self.augmentation = augmentation
+        self.return_index = bool(return_index)
 
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.cache_version = str(cache_version)
@@ -583,7 +730,7 @@ class BirdDataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, i: int) -> Tuple[torch.Tensor, int]:
+    def __getitem__(self, i: int) -> Tuple[torch.Tensor, int] | Tuple[torch.Tensor, int, int]:
         idx = int(self.indices[i])
 
         cache_path = self._cache_path(idx)
@@ -628,7 +775,10 @@ class BirdDataset(Dataset):
             img = _ensure_uint8_rgb(img)
 
         x = self.model_transform(Image.fromarray(img))
-        return x, int(self.labels[i])
+        y = int(self.labels[i])
+        if self.return_index:
+            return x, y, idx
+        return x, y
 
 
 # =============================================================================
@@ -696,10 +846,10 @@ def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
     if hasattr(torch, 'compile') and torch.cuda.is_available():
         try:
             compiled = torch.compile(model, mode='reduce-overhead')
-            print("✓ torch.compile enabled (10-30% speedup)")
+            print("torch.compile enabled (10-30% speedup)")
             return compiled
         except Exception as e:
-            print(f"⚠️ torch.compile failed, using eager mode: {e}")
+            print(f"torch.compile failed, using eager mode: {e}")
             return model
     return model
 
@@ -772,7 +922,8 @@ def evaluate(
     n = 0
     y_true, y_pred = [], []
 
-    for x, y in loader:
+    for batch in loader:
+        x, y = batch[0], batch[1]
         x, y = x.to(device), y.to(device)
         logits = model(x)
         loss = criterion(logits, y)
@@ -796,15 +947,18 @@ def evaluate_with_preds(
     device: torch.device,
     criterion: nn.Module,
     topk: int = 5,
-) -> Tuple[Dict[str, float], List[int], List[int]]:
+) -> Tuple[Dict[str, float], List[int], List[int], List[int] | None]:
     """Evaluate model and also return (y_true, y_pred) for detailed reports."""
     model.eval()
     total_loss = 0.0
     n = 0
     topk_correct = 0
     y_true, y_pred = [], []
+    indices: List[int] | None = []
 
-    for x, y in loader:
+    for batch in loader:
+        x, y = batch[0], batch[1]
+        idx = batch[2] if len(batch) >= 3 else None
         x, y = x.to(device), y.to(device)
         logits = model(x)
         loss = criterion(logits, y)
@@ -815,6 +969,14 @@ def evaluate_with_preds(
 
         y_true.extend(y.cpu().tolist())
         y_pred.extend(logits.argmax(dim=1).cpu().tolist())
+        if indices is not None:
+            if idx is None:
+                indices = None
+            else:
+                if torch.is_tensor(idx):
+                    indices.extend([int(v) for v in idx.cpu().tolist()])
+                else:
+                    indices.extend([int(v) for v in idx])
 
         k = int(min(max(1, topk), logits.shape[1]))
         topk_idx = logits.topk(k=k, dim=1).indices
@@ -823,7 +985,7 @@ def evaluate_with_preds(
     metrics = compute_metrics(y_true, y_pred)
     metrics["loss"] = total_loss / max(1, n)
     metrics["top5_acc"] = float(topk_correct / max(1, n))
-    return metrics, y_true, y_pred
+    return metrics, y_true, y_pred, indices
 
 
 def train_one_epoch(
@@ -860,7 +1022,8 @@ def train_one_epoch(
     print("    Loading first batch...", flush=True)
     pbar = tqdm(loader, desc="Train", leave=False)
     first_batch = True
-    for x, y in pbar:
+    for batch in pbar:
+        x, y = batch[0], batch[1]
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad(set_to_none=True)
 
@@ -883,7 +1046,7 @@ def train_one_epoch(
         # Debug: Print memory after first batch
         if first_batch and device.type == "cuda":
             peak_mem = torch.cuda.max_memory_allocated() / 1e9
-            print(f"    First batch complete! Peak GPU memory: {peak_mem:.2f}GB", flush=True)
+            print(f"    First batch complete. Peak GPU memory: {peak_mem:.2f}GB", flush=True)
             first_batch = False
 
         bs = x.shape[0]
@@ -909,8 +1072,13 @@ def plot_evaluation_suite(
     y_pred: List[int],
     class_ids: List[int],
     run_name: str = "",
-    top_n_classes: int = 20,
-    figsize: Tuple[int, int] = (18, 14),
+    *,
+    ds=None,
+    sample_indices: List[int] | None = None,
+    top_n_cm_classes: int = 20,
+    top_n_pairs: int = 5,
+    images_per_pair: int = 3,
+    figsize: Tuple[int, int] = (18, 10),
 ) -> None:
     """
     Comprehensive evaluation visualization after training.
@@ -930,22 +1098,61 @@ def plot_evaluation_suite(
         top_n_classes: Number of classes to show in confusion matrix detail
         figsize: Figure size
     """
+    report = classification_report(
+        y_true,
+        y_pred,
+        labels=list(range(len(class_ids))),
+        output_dict=True,
+        zero_division=0,
+    )
+
+    acc = float(accuracy_score(y_true, y_pred))
+    macro_prec = float(report["macro avg"]["precision"])
+    macro_rec = float(report["macro avg"]["recall"])
+    macro_f1 = float(report["macro avg"]["f1-score"])
+    weighted_f1 = float(report["weighted avg"]["f1-score"])
+
+    best_epoch = int(history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"])
+    best_f1 = float(history_df["val_f1"].max())
+
+    summary_df = pd.DataFrame(
+        [
+            ("Accuracy", acc),
+            ("Macro Precision", macro_prec),
+            ("Macro Recall", macro_rec),
+            ("Macro F1", macro_f1),
+            ("Weighted F1", weighted_f1),
+            ("Samples", int(len(y_true))),
+            ("Classes", int(len(class_ids))),
+            (
+                "Classes with F1=0",
+                int(sum(1 for i in range(len(class_ids)) if report.get(str(i), {}).get("f1-score", 1.0) == 0)),
+            ),
+            ("Best Val F1", best_f1),
+            ("Best Val F1 Epoch", best_epoch),
+        ],
+        columns=["Metric", "Value"],
+    )
+
+    print("\nEvaluation Summary")
+    with pd.option_context("display.max_rows", 200, "display.max_colwidth", 120):
+        print(summary_df.to_string(index=False))
+
     fig = plt.figure(figsize=figsize)
-    
-    # Create grid: 2 rows x 3 cols for training curves, 1 large row for confusion matrix
-    gs = fig.add_gridspec(3, 3, height_ratios=[1, 1, 1.5], hspace=0.35, wspace=0.3)
-    
+    gs = fig.add_gridspec(2, 3, height_ratios=[1, 1.35], hspace=0.35, wspace=0.3)
+
     epochs = history_df["global_epoch"]
-    head_epochs = history_df[history_df["stage"] == "head"]["global_epoch"].max() if "head" in history_df["stage"].values else 0
-    
+    head_epochs = (
+        history_df[history_df["stage"] == "head"]["global_epoch"].max()
+        if "head" in history_df["stage"].values
+        else 0
+    )
+
     train_color = "#2ecc71"
     val_color = "#e74c3c"
-    
-    # =========================================================================
-    # Row 1: Training Curves
-    # =========================================================================
-    
-    # Loss
+    val_prec_color = "#3498db"
+    val_rec_color = "#f39c12"
+
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.plot(epochs, history_df["train_loss"], label="Train", color=train_color, marker="o", markersize=4, linewidth=2)
     ax1.plot(epochs, history_df["val_loss"], label="Val", color=val_color, marker="s", markersize=4, linewidth=2)
@@ -956,8 +1163,7 @@ def plot_evaluation_suite(
     ax1.set_title("Loss", fontweight="bold")
     ax1.legend(loc="upper right", fontsize=9)
     ax1.grid(True, alpha=0.3)
-    
-    # Accuracy
+
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.plot(epochs, history_df["train_acc"], label="Train", color=train_color, marker="o", markersize=4, linewidth=2)
     ax2.plot(epochs, history_df["val_acc"], label="Val", color=val_color, marker="s", markersize=4, linewidth=2)
@@ -969,173 +1175,175 @@ def plot_evaluation_suite(
     ax2.legend(loc="lower right", fontsize=9)
     ax2.grid(True, alpha=0.3)
     ax2.set_ylim(0, 1)
-    
-    # F1 Score
+
     ax3 = fig.add_subplot(gs[0, 2])
-    ax3.plot(epochs, history_df["train_f1"], label="Train", color=train_color, marker="o", markersize=4, linewidth=2)
-    ax3.plot(epochs, history_df["val_f1"], label="Val", color=val_color, marker="s", markersize=4, linewidth=2)
+    ax3.plot(epochs, history_df["train_f1"], label="Train F1", color=train_color, marker="o", markersize=4, linewidth=2)
+    ax3.plot(epochs, history_df["val_f1"], label="Val F1", color=val_color, marker="s", markersize=4, linewidth=2)
+
+    if "train_precision" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["train_precision"],
+            label="Train Precision",
+            color=train_color,
+            linestyle="--",
+            linewidth=1.8,
+            alpha=0.8,
+        )
+    if "train_recall" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["train_recall"],
+            label="Train Recall",
+            color=train_color,
+            linestyle=":",
+            linewidth=1.8,
+            alpha=0.8,
+        )
+    if "val_precision" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["val_precision"],
+            label="Val Precision",
+            color=val_prec_color,
+            linestyle="--",
+            linewidth=2,
+        )
+    if "val_recall" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["val_recall"],
+            label="Val Recall",
+            color=val_rec_color,
+            linestyle="--",
+            linewidth=2,
+        )
+
     if head_epochs > 0:
         ax3.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
     ax3.set_xlabel("Epoch")
-    ax3.set_ylabel("Macro F1")
-    ax3.set_title("F1 Score (Macro)", fontweight="bold")
-    ax3.legend(loc="lower right", fontsize=9)
+    ax3.set_ylabel("Macro Score")
+    ax3.set_title("Macro F1 / Precision / Recall", fontweight="bold")
+    ax3.legend(loc="lower right", fontsize=8)
     ax3.grid(True, alpha=0.3)
     ax3.set_ylim(0, 1)
-    
-    # Highlight best epoch
-    best_epoch = history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"]
-    best_f1 = history_df["val_f1"].max()
+
     ax3.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
-    ax3.scatter([best_epoch], [best_f1], color="#9b59b6", s=100, zorder=5, marker="*")
-    
-    # =========================================================================
-    # Row 2: Per-class Performance (worst classes)
-    # =========================================================================
-    
-    # Compute per-class metrics
-    report = classification_report(y_true, y_pred, labels=list(range(len(class_ids))), 
-                                    output_dict=True, zero_division=0)
-    
-    # Extract per-class F1 scores
-    class_f1s = []
-    for i, cid in enumerate(class_ids):
-        if str(i) in report:
-            class_f1s.append((cid, report[str(i)]["f1-score"], report[str(i)]["support"]))
-    
-    # Sort by F1 (worst first)
-    class_f1s_sorted = sorted(class_f1s, key=lambda x: x[1])
-    
-    # Plot worst performing classes
-    ax4 = fig.add_subplot(gs[1, :2])
-    worst_n = min(top_n_classes, len(class_f1s_sorted))
-    worst_classes = class_f1s_sorted[:worst_n]
-    class_labels = [f"Class {c[0]}" for c in worst_classes]
-    f1_scores = [c[1] for c in worst_classes]
-    supports = [c[2] for c in worst_classes]
-    
-    colors = plt.cm.RdYlGn(np.array(f1_scores))  # Red for low, green for high
-    bars = ax4.barh(range(len(class_labels)), f1_scores, color=colors)
-    ax4.set_yticks(range(len(class_labels)))
-    ax4.set_yticklabels(class_labels, fontsize=8)
-    ax4.set_xlabel("F1 Score")
-    ax4.set_title(f"Worst {worst_n} Classes by F1 Score", fontweight="bold")
-    ax4.set_xlim(0, 1)
-    ax4.invert_yaxis()
-    ax4.grid(True, axis="x", alpha=0.3)
-    
-    # Add support counts
-    for i, (f1, sup) in enumerate(zip(f1_scores, supports)):
-        ax4.text(f1 + 0.02, i, f"n={int(sup)}", va="center", fontsize=7, alpha=0.7)
-    
-    # Summary stats
-    ax5 = fig.add_subplot(gs[1, 2])
-    ax5.axis("off")
-    
-    # Calculate summary metrics
-    acc = accuracy_score(y_true, y_pred)
-    macro_prec = report["macro avg"]["precision"]
-    macro_rec = report["macro avg"]["recall"]
-    macro_f1 = report["macro avg"]["f1-score"]
-    weighted_f1 = report["weighted avg"]["f1-score"]
-    
-    summary_text = f"""
-    EVALUATION SUMMARY
-    {'─' * 30}
-    
-    Accuracy:           {acc:.4f}
-    
-    Macro Precision:    {macro_prec:.4f}
-    Macro Recall:       {macro_rec:.4f}
-    Macro F1:           {macro_f1:.4f}
-    
-    Weighted F1:        {weighted_f1:.4f}
-    
-    {'─' * 30}
-    Total samples:      {len(y_true):,}
-    Total classes:      {len(class_ids)}
-    Classes with F1=0:  {sum(1 for c in class_f1s if c[1] == 0)}
-    
-    Best Val F1:        {best_f1:.4f} (epoch {int(best_epoch)})
-    """
-    ax5.text(0.1, 0.95, summary_text, transform=ax5.transAxes, fontsize=10,
-             verticalalignment="top", fontfamily="monospace",
-             bbox=dict(boxstyle="round,pad=0.5", facecolor="lightgray", alpha=0.3))
-    
-    # =========================================================================
-    # Row 3: Confusion Matrix (most confused pairs)
-    # =========================================================================
-    
-    ax6 = fig.add_subplot(gs[2, :])
-    
-    # Compute full confusion matrix
+    ax3.scatter([best_epoch], [best_f1], color="#9b59b6", s=80, zorder=5, marker="o")
+
+    ax6 = fig.add_subplot(gs[1, :])
+
     cm = confusion_matrix(y_true, y_pred, labels=list(range(len(class_ids))))
-    
-    # Find most confused pairs (off-diagonal)
     confused_pairs = []
     for i in range(len(class_ids)):
         for j in range(len(class_ids)):
             if i != j and cm[i, j] > 0:
-                confused_pairs.append((class_ids[i], class_ids[j], cm[i, j]))
-    
-    # Sort by confusion count
-    confused_pairs_sorted = sorted(confused_pairs, key=lambda x: -x[2])[:top_n_classes]
-    
-    # Get unique classes involved in top confusions
-    confused_class_ids = set()
-    for true_id, pred_id, _ in confused_pairs_sorted:
-        confused_class_ids.add(true_id)
-        confused_class_ids.add(pred_id)
-    confused_class_ids = sorted(confused_class_ids)[:top_n_classes]
-    
-    # Create subset confusion matrix
-    id_to_new_idx = {cid: i for i, cid in enumerate(confused_class_ids)}
-    old_idx_map = {cid: class_ids.index(cid) for cid in confused_class_ids if cid in class_ids}
-    
-    cm_subset = np.zeros((len(confused_class_ids), len(confused_class_ids)), dtype=int)
-    for i, cid_i in enumerate(confused_class_ids):
-        for j, cid_j in enumerate(confused_class_ids):
-            if cid_i in old_idx_map and cid_j in old_idx_map:
-                cm_subset[i, j] = cm[old_idx_map[cid_i], old_idx_map[cid_j]]
-    
-    # Plot heatmap
-    sns.heatmap(cm_subset, annot=True, fmt="d", cmap="Blues", ax=ax6,
-                xticklabels=[f"{c}" for c in confused_class_ids],
-                yticklabels=[f"{c}" for c in confused_class_ids],
-                cbar_kws={"label": "Count"})
+                confused_pairs.append((i, j, int(cm[i, j])))
+    confused_pairs_sorted = sorted(confused_pairs, key=lambda x: -x[2])
+
+    top_pairs = confused_pairs_sorted[: max(0, int(top_n_pairs))]
+
+    confused_class_idxs = set()
+    for true_i, pred_i, _ in confused_pairs_sorted[: max(0, int(top_n_cm_classes))]:
+        confused_class_idxs.add(true_i)
+        confused_class_idxs.add(pred_i)
+
+    if not confused_class_idxs:
+        # No confusions (or only correct predictions). Show a small subset so the plot still renders.
+        confused_class_idxs = set(range(min(int(top_n_cm_classes), len(class_ids))))
+
+    confused_class_idxs = sorted(confused_class_idxs)[: max(2, int(min(top_n_cm_classes, len(class_ids))))]
+
+    cm_subset = cm[np.ix_(confused_class_idxs, confused_class_idxs)]
+    tick_labels = [str(class_ids[i]) for i in confused_class_idxs]
+
+    sns.heatmap(
+        cm_subset,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        ax=ax6,
+        xticklabels=tick_labels,
+        yticklabels=tick_labels,
+        cbar_kws={"label": "Count"},
+    )
     ax6.set_xlabel("Predicted Class ID", fontsize=10)
     ax6.set_ylabel("True Class ID", fontsize=10)
-    ax6.set_title(f"Confusion Matrix (Top {len(confused_class_ids)} Most Confused Classes)", fontweight="bold")
-    
-    # Rotate labels
+    ax6.set_title("Confusion Matrix (Most Confused Classes)", fontweight="bold")
     ax6.set_xticklabels(ax6.get_xticklabels(), rotation=45, ha="right", fontsize=8)
     ax6.set_yticklabels(ax6.get_yticklabels(), rotation=0, fontsize=8)
-    
-    # Main title
-    title = "Model Evaluation Suite"
-    if run_name:
-        title += f" — {run_name}"
-    fig.suptitle(title, fontsize=14, fontweight="bold", y=1.01)
-    
+
+    fig.suptitle("Model Evaluation", fontsize=14, fontweight="bold", y=1.01)
     plt.tight_layout()
     plt.show()
-    
-    # Print classification report for worst classes
-    print("\n" + "=" * 70)
-    print(f"CLASSIFICATION REPORT — Worst {min(10, len(class_f1s_sorted))} Classes")
-    print("=" * 70)
-    for cid, f1, support in class_f1s_sorted[:10]:
-        idx = class_ids.index(cid)
-        prec = report[str(idx)]["precision"]
-        rec = report[str(idx)]["recall"]
-        print(f"  Class {cid:>4}: P={prec:.3f}, R={rec:.3f}, F1={f1:.3f}, support={int(support)}")
-    
-    # Print most confused pairs
-    print("\n" + "=" * 70)
-    print(f"MOST CONFUSED PAIRS (True → Predicted)")
-    print("=" * 70)
-    for true_id, pred_id, count in confused_pairs_sorted[:10]:
-        print(f"  Class {true_id:>4} → Class {pred_id:>4}: {count} misclassifications")
+
+    if top_pairs:
+        print("\nMost Confused Pairs (True -> Predicted)")
+        for true_i, pred_i, count in top_pairs:
+            print(f"  {class_ids[true_i]} -> {class_ids[pred_i]}: {count}")
+
+    if ds is not None and sample_indices is not None and len(sample_indices) == len(y_true) and top_pairs:
+        _plot_confused_pair_examples(
+            ds=ds,
+            sample_indices=sample_indices,
+            y_true=y_true,
+            y_pred=y_pred,
+            class_ids=class_ids,
+            pairs=top_pairs,
+            images_per_pair=images_per_pair,
+        )
+
+
+def _plot_confused_pair_examples(
+    *,
+    ds,
+    sample_indices: List[int],
+    y_true: List[int],
+    y_pred: List[int],
+    class_ids: List[int],
+    pairs: List[Tuple[int, int, int]],
+    images_per_pair: int = 3,
+    figsize: Tuple[int, int] | None = None,
+) -> None:
+    images_per_pair = max(1, int(images_per_pair))
+    n_pairs = len(pairs)
+    if n_pairs <= 0:
+        return
+
+    if figsize is None:
+        figsize = (images_per_pair * 3.2, max(3.0, n_pairs * 2.6))
+
+    fig, axes = plt.subplots(n_pairs, images_per_pair, figsize=figsize)
+    if n_pairs == 1:
+        axes = np.array([axes])
+
+    for row, (true_i, pred_i, count) in enumerate(pairs):
+        matches = [k for k, (yt, yp) in enumerate(zip(y_true, y_pred)) if yt == true_i and yp == pred_i]
+        chosen = matches[:images_per_pair]
+        while len(chosen) < images_per_pair:
+            chosen.append(None)
+
+        true_id = class_ids[true_i]
+        pred_id = class_ids[pred_i]
+
+        for col, k in enumerate(chosen):
+            ax = axes[row, col]
+            ax.axis("off")
+            if k is None:
+                continue
+            ds_idx = int(sample_indices[k])
+            try:
+                sample = ds[ds_idx]
+                img = _ensure_uint8_rgb(sample["images"].numpy())
+            except Exception:
+                continue
+            ax.imshow(img)
+            if col == 0:
+                ax.set_title(f"{true_id} -> {pred_id} (n={count})", fontsize=9)
+
+    fig.suptitle("Confused Pair Examples (Top Pairs)", fontsize=12, fontweight="bold")
+    plt.tight_layout()
+    plt.show()
 
 
 
@@ -1274,7 +1482,8 @@ class TrainConfig:
     Attributes:
         run_name: Unique name for this experiment (used for saving)
         preprocess_mode: 'native' or 'bbox_crop'
-        augmentation: Name from AUGMENTATION_REGISTRY or 'none'
+        augmentation: Name from AUGMENTATION_REGISTRY, 'none', or 'recipe'
+        augmentation_params: Parameters for 'recipe' augmentation
         bbox_padding_ratio: Padding around bbox as fraction of bbox size
         pad_to_square: Whether to pad images to square before model transforms
         
@@ -1295,6 +1504,9 @@ class TrainConfig:
         
         freeze_bn_head: Keep BatchNorm in eval mode during Stage 1
         freeze_bn_finetune: Keep BatchNorm in eval mode during Stage 2
+
+        resume_head_ckpt: Optional path to a previously saved best head checkpoint (.pt).
+          If set, Stage 1 is skipped and training starts from that checkpoint.
         
         early_stop_patience: Stop if val F1 doesn't improve for N epochs (0 = disabled)
         
@@ -1305,7 +1517,8 @@ class TrainConfig:
     
     # Preprocessing
     preprocess_mode: str = "native"  # 'native' or 'bbox_crop'
-    augmentation: str = "none"  # 'none', 'basic', 'moderate', 'strong'
+    augmentation: str = "none"  # 'none', registry name, or 'recipe'
+    augmentation_params: Dict[str, Any] | None = None
     bbox_padding_ratio: float = 0.15
     pad_to_square: bool = True
 
@@ -1334,6 +1547,9 @@ class TrainConfig:
     # BatchNorm handling
     freeze_bn_head: bool = True
     freeze_bn_finetune: bool = True
+
+    # Resume (optional)
+    resume_head_ckpt: str | None = None
     
     # Early stopping (0 = disabled)
     early_stop_patience: int = 3
@@ -1345,8 +1561,14 @@ class TrainConfig:
         """Validate configuration after initialization."""
         if self.preprocess_mode not in {"native", "bbox_crop"}:
             raise ValueError(f"preprocess_mode must be 'native' or 'bbox_crop', got '{self.preprocess_mode}'")
+        if self.augmentation == "recipe":
+            if not isinstance(self.augmentation_params, dict) or not self.augmentation_params:
+                raise ValueError("augmentation_params must be a non-empty dict when augmentation='recipe'")
+            return
         if self.augmentation not in AUGMENTATION_REGISTRY and self.augmentation != "none":
-            raise ValueError(f"augmentation must be one of {list(AUGMENTATION_REGISTRY.keys())} or 'none'")
+            raise ValueError(
+                f"augmentation must be one of {list(AUGMENTATION_REGISTRY.keys())}, 'recipe', or 'none'"
+            )
 
 
 
@@ -1365,6 +1587,7 @@ def train_two_stage(
     splits=None,
     evaluate_test: bool = True,
     evaluate_holdout: bool = False,
+    on_epoch_end: Callable[[str, Dict[str, float], int], None] | None = None,
     device: torch.device = DEVICE,
     output_dir: Path = RUNS_DIR,
 ) -> Tuple[nn.Module, pd.DataFrame, Dict[str, Any], Path]:
@@ -1413,18 +1636,29 @@ def train_two_stage(
             seed=cfg.seed,
         )
     
-    print(f"📊 Splits: train={len(splits.train_idx)}, val={len(splits.val_idx)}, test={len(splits.test_idx)}")
+    print(f"Splits: train={len(splits.train_idx)}, val={len(splits.val_idx)}, test={len(splits.test_idx)}")
     
     # Build model
     model, weights = build_efficientnet_b4(num_classes)
     model = model.to(device)
-    
+
     # Apply torch.compile for speedup (PyTorch 2.0+)
     if cfg.use_torch_compile:
         model = maybe_compile_model(model, enable=True)
-    
+
+    resumed_from_head = False
+    if cfg.resume_head_ckpt:
+        resume_path = Path(cfg.resume_head_ckpt)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"resume_head_ckpt not found: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        if not isinstance(ckpt, dict) or "model_state" not in ckpt:
+            raise ValueError(f"Invalid head checkpoint (missing 'model_state'): {resume_path}")
+        model.load_state_dict(ckpt["model_state"])
+        resumed_from_head = True
+
     # Get augmentation
-    train_aug = get_augmentation(cfg.augmentation)
+    train_aug = resolve_train_augmentation(cfg.augmentation, cfg.augmentation_params)
 
     cache_dir = Path(cfg.cache_dir) if cfg.cache_dir else None
     
@@ -1456,6 +1690,7 @@ def train_two_stage(
         bbox_padding_ratio=cfg.bbox_padding_ratio,
         pad_to_square=cfg.pad_to_square,
         augmentation=None,
+        return_index=True,
         cache_dir=cache_dir,
         cache_version=cfg.cache_version,
     )
@@ -1485,8 +1720,9 @@ def train_two_stage(
             bbox_padding_ratio=cfg.bbox_padding_ratio,
             pad_to_square=cfg.pad_to_square,
             augmentation=None,
-        cache_dir=cache_dir,
-        cache_version=cfg.cache_version,
+            return_index=True,
+            cache_dir=cache_dir,
+            cache_version=cfg.cache_version,
         )
         holdout_loader = make_dataloader(holdout_ds, cfg.batch_size, shuffle=False)
     
@@ -1535,9 +1771,13 @@ def train_two_stage(
                 "global_epoch": epoch_offset + ep,
                 "train_loss": train_metrics["loss"],
                 "train_acc": train_metrics["acc"],
+                "train_precision": train_metrics["precision"],
+                "train_recall": train_metrics["recall"],
                 "train_f1": train_metrics["f1"],
                 "val_loss": val_metrics["loss"],
                 "val_acc": val_metrics["acc"],
+                "val_precision": val_metrics["precision"],
+                "val_recall": val_metrics["recall"],
                 "val_f1": val_metrics["f1"],
                 "seconds": elapsed,
             }
@@ -1549,6 +1789,9 @@ def train_two_stage(
                 "val_loss": f"{val_metrics['loss']:.3f}",
                 "best_f1": f"{max(best_f1, val_metrics['f1']):.3f}",
             })
+
+            if on_epoch_end is not None:
+                on_epoch_end(stage_name, val_metrics, epoch_offset + ep)
             
             # Checkpoint
             if val_metrics["f1"] > best_f1:
@@ -1575,24 +1818,43 @@ def train_two_stage(
     # ==========================================================================
     # STAGE 1: Head Training (Frozen Backbone)
     # ==========================================================================
-    print(f"\n{'='*60}")
-    print("STAGE 1: Training Classification Head (Backbone Frozen)")
-    print(f"{'='*60}")
-    
-    freeze_backbone(model)
-    optimizer_head = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
-        lr=cfg.lr_head,
-        weight_decay=cfg.weight_decay,
-    )
-    
-    best_head_path = run_stage(
-        "head", cfg.head_epochs, optimizer_head, 
-        freeze_bn=cfg.freeze_bn_head, epoch_offset=0
-    )
-    
-    # Load best head checkpoint
-    model.load_state_dict(torch.load(best_head_path, map_location=device)["model_state"])
+    best_head_path: Path | None = None
+    finetune_epoch_offset = 0
+    if resumed_from_head:
+        print(f"\n{'='*60}")
+        print("STAGE 1: Skipped (Resuming from best head checkpoint)")
+        print(f"{'='*60}")
+        print(f"Resume: {cfg.resume_head_ckpt}")
+        best_head_path = Path(cfg.resume_head_ckpt)
+        finetune_epoch_offset = 0
+    elif cfg.head_epochs > 0:
+        print(f"\n{'='*60}")
+        print("STAGE 1: Training Classification Head (Backbone Frozen)")
+        print(f"{'='*60}")
+
+        freeze_backbone(model)
+        optimizer_head = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=cfg.lr_head,
+            weight_decay=cfg.weight_decay,
+        )
+
+        best_head_path = run_stage(
+            "head",
+            cfg.head_epochs,
+            optimizer_head,
+            freeze_bn=cfg.freeze_bn_head,
+            epoch_offset=0,
+        )
+
+        # Load best head checkpoint
+        model.load_state_dict(torch.load(best_head_path, map_location=device)["model_state"])
+        finetune_epoch_offset = cfg.head_epochs
+    else:
+        print(f"\n{'='*60}")
+        print("STAGE 1: Skipped (head_epochs=0)")
+        print(f"{'='*60}")
+        finetune_epoch_offset = 0
     
     # ==========================================================================
     # STAGE 2: Fine-tuning (All Layers) — only if finetune_epochs > 0
@@ -1616,7 +1878,7 @@ def train_two_stage(
         
         best_finetune_path = run_stage(
             "finetune", cfg.finetune_epochs, optimizer_finetune,
-            freeze_bn=cfg.freeze_bn_finetune, epoch_offset=cfg.head_epochs
+            freeze_bn=cfg.freeze_bn_finetune, epoch_offset=finetune_epoch_offset
         )
         
         # Load best fine-tuned checkpoint
@@ -1636,7 +1898,7 @@ def train_two_stage(
     test_metrics = None
     test_y_true, test_y_pred = None, None
     if evaluate_test:
-        test_metrics, test_y_true, test_y_pred = evaluate_with_preds(model, test_loader, device, criterion)
+        test_metrics, test_y_true, test_y_pred, test_indices = evaluate_with_preds(model, test_loader, device, criterion)
         (run_dir / "test_classification_report.txt").write_text(
             classification_report(
                 test_y_true,
@@ -1661,7 +1923,9 @@ def train_two_stage(
     holdout_metrics = None
     holdout_y_true, holdout_y_pred = None, None
     if evaluate_holdout:
-        holdout_metrics, holdout_y_true, holdout_y_pred = evaluate_with_preds(model, holdout_loader, device, criterion)
+        holdout_metrics, holdout_y_true, holdout_y_pred, holdout_indices = evaluate_with_preds(
+            model, holdout_loader, device, criterion
+        )
         (run_dir / "holdout_classification_report.txt").write_text(
             classification_report(
                 holdout_y_true,
@@ -1694,8 +1958,10 @@ def train_two_stage(
         "class_ids": class_ids,  # Include class_ids for evaluation suite
         "test_y_true": test_y_true,
         "test_y_pred": test_y_pred,
+        "test_indices": test_indices if evaluate_test else None,
         "holdout_y_true": holdout_y_true,
         "holdout_y_pred": holdout_y_pred,
+        "holdout_indices": holdout_indices if evaluate_holdout else None,
     }
     (run_dir / "summary.json").write_text(json.dumps({
         "test": test_metrics,
@@ -1823,7 +2089,7 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     plt.show()
     
     # Print summary statistics
-    print("\n📊 Training Summary:")
+    print("\nTraining Summary:")
     print(f"   Best Val F1: {history_df['val_f1'].max():.4f} (epoch {int(best_epoch)})")
     print(f"   Best Val Acc: {history_df['val_acc'].max():.4f}")
     print(f"   Final Train Loss: {history_df['train_loss'].iloc[-1]:.4f}")
@@ -1890,6 +2156,8 @@ def make_experiment_runner(
                     y_pred=summary["test_y_pred"],
                     class_ids=summary["class_ids"],
                     run_name=cfg.run_name,
+                    ds=ds_train,
+                    sample_indices=summary.get("test_indices"),
                 )
             else:
                 # Fallback to simple training history plot if no test predictions
@@ -1900,6 +2168,8 @@ def make_experiment_runner(
             "run_name": cfg.run_name,
             "preprocess_mode": cfg.preprocess_mode,
             "augmentation": cfg.augmentation,
+            "augmentation_params": cfg.augmentation_params,
+            "resume_head_ckpt": cfg.resume_head_ckpt,
             "val_best_f1": summary.get("val_best_f1"),
             "test_f1": test.get("f1"),
             "test_acc": test.get("acc"),
@@ -1957,10 +2227,10 @@ def make_experiment_runner(
         if holdout_index is None:
             if val_clean_path.exists():
                 holdout_index = load_label_index(val_clean_path)
-                print(f"✅ Using CLEANED holdout index from {val_clean_path}")
+                print(f"Using cleaned holdout index from {val_clean_path}")
             elif holdout_index_path.exists():
                 holdout_index = load_label_index(holdout_index_path)
-                print(f"⚠️  Using original holdout index from {holdout_index_path}")
+                print(f"Using original holdout index from {holdout_index_path}")
             else:
                 holdout_index = build_label_index(ds_holdout)
                 save_label_index(holdout_index, holdout_index_path)
@@ -1992,6 +2262,8 @@ def make_experiment_runner(
                     y_pred=summary["holdout_y_pred"],
                     class_ids=summary["class_ids"],
                     run_name=f"{cfg.run_name} (Holdout)",
+                    ds=ds_holdout,
+                    sample_indices=summary.get("holdout_indices"),
                 )
             else:
                 plot_training_history(history_df, run_name=cfg.run_name)
@@ -2007,6 +2279,3 @@ def make_experiment_runner(
         final_holdout=final_holdout,
         results=results,
     )
-
-
-

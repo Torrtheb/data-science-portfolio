@@ -43,6 +43,14 @@ from torchvision import models, transforms
 
 # initial utils 
 def seed_everything(seed: int = 42) -> None:
+    """Set random seeds for reproducibility across all libraries.
+
+    Args:
+        seed: Random seed value to use for all random number generators.
+
+    Returns:
+        None
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -53,7 +61,14 @@ def seed_everything(seed: int = 42) -> None:
 # Device selection utility
 
 def get_device() -> torch.device:
-    """Pick the best available device (CUDA → MPS → CPU)."""
+    """Pick the best available device (CUDA → MPS → CPU).
+
+    Automatically detects and returns the optimal compute device for PyTorch
+    operations in order of preference: CUDA GPU, Apple MPS, or CPU.
+
+    Returns:
+        torch.device: The best available device for tensor operations.
+    """
     if torch.cuda.is_available():
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -67,12 +82,20 @@ def make_optimized_loader(
     sampler=None,
     num_workers: int = 4,
 ) -> DataLoader:
-    """
-    Create a DataLoader with GPU optimizations:
-    - num_workers: Parallel data loading (reduces CPU-GPU bottleneck)
-    - pin_memory: Faster CPU→GPU transfer
-    - prefetch_factor: Preload batches while GPU computes
-    - persistent_workers: Keep workers alive between epochs
+    """Create a DataLoader with GPU optimizations for efficient data loading.
+
+    Configures DataLoader with optimal settings for GPU training including
+    parallel data loading, memory pinning, and prefetching.
+
+    Args:
+        ds: PyTorch Dataset to load data from.
+        batch_size: Number of samples per batch.
+        shuffle: Whether to shuffle data each epoch (ignored if sampler is provided).
+        sampler: Optional sampler for custom sampling strategy.
+        num_workers: Number of worker processes for parallel data loading.
+
+    Returns:
+        DataLoader: Configured DataLoader with GPU optimizations enabled.
     """
     use_workers = num_workers if torch.cuda.is_available() else 0
     
@@ -88,9 +111,17 @@ def make_optimized_loader(
     )
 
 def maybe_compile_model(model: torch.nn.Module, enable: bool = True) -> torch.nn.Module:
-    """
-    Compile model with torch.compile for 10-30% speedup (PyTorch 2.0+).
-    Falls back gracefully on older versions.
+    """Optionally compile model with torch.compile for performance speedup.
+
+    Attempts to use PyTorch 2.0+ torch.compile for 10-30% inference/training
+    speedup. Falls back gracefully on older PyTorch versions or non-CUDA devices.
+
+    Args:
+        model: PyTorch model to potentially compile.
+        enable: Whether to attempt compilation. If False, returns model unchanged.
+
+    Returns:
+        torch.nn.Module: Compiled model if successful, original model otherwise.
     """
     if not enable:
         return model
@@ -115,16 +146,20 @@ def resolve_bbox_from_box_array(
     img_h: int, 
     img_w: int
 ) -> Optional[Tuple[float, float, float, float]]:
-    """
-    Convert bbox to pixel-space (x1, y1, x2, y2) clipped to image bounds.
-    Handles (x,y,w,h), (x1,y1,x2,y2), and normalized corners.
-    
-    OPTIMIZED: Takes pre-loaded box array and image dimensions to avoid
-    redundant image loading.
-    Handles:
-    - Normalized xyxy (0-1 range)
-    - xywh format
-    - xyxy format
+    """Convert bounding box to pixel-space (x1, y1, x2, y2) clipped to image bounds.
+
+    Automatically detects and handles multiple bounding box formats:
+    normalized xyxy (0-1 range), xywh format, and xyxy format.
+
+    Args:
+        box: Bounding box array in any supported format (normalized xyxy, xywh, or xyxy).
+        img_h: Image height in pixels.
+        img_w: Image width in pixels.
+
+    Returns:
+        Optional[Tuple[float, float, float, float]]: Bounding box as (x1, y1, x2, y2)
+            in pixel coordinates, clipped to image bounds. Returns None if the box
+            is invalid or results in a degenerate region.
     """
     box = np.asarray(box, dtype=float).squeeze()
     if box.shape[-1] != 4:
@@ -152,9 +187,19 @@ def resolve_bbox_from_box_array(
 
 
 def resolve_bbox_xywh_or_xyxy(ds, idx: int):
-    """
-    Legacy wrapper - loads image to get dimensions.
-    Prefer resolve_bbox_from_box_array() when image is already loaded.
+    """Legacy wrapper that loads image to get dimensions for bbox resolution.
+
+    .. deprecated::
+        Prefer resolve_bbox_from_box_array() when image is already loaded
+        to avoid redundant data loading.
+
+    Args:
+        ds: DeepLake dataset containing 'images' and 'boxes' tensors.
+        idx: Index of the sample in the dataset.
+
+    Returns:
+        Optional[Tuple[float, float, float, float]]: Bounding box as (x1, y1, x2, y2)
+            in pixel coordinates, or None if invalid.
     """
     img = ds["images"][idx].numpy()
     h, w = img.shape[:2]
@@ -167,9 +212,19 @@ def apply_bbox_crop_optimized(
     box: np.ndarray, 
     padding_ratio: float = 0.15
 ) -> np.ndarray:
-    """
-    OPTIMIZED: Crop to bounding box with padding.
-    Takes pre-loaded image and box array to avoid redundant DeepLake access.
+    """Crop image to bounding box with padding using pre-loaded data.
+
+    Extracts the region defined by the bounding box with additional padding
+    around the edges. Uses reflection padding when the padded region extends
+    beyond image boundaries.
+
+    Args:
+        img: Input image as numpy array with shape (H, W, C).
+        box: Bounding box array in any supported format.
+        padding_ratio: Fraction of box dimensions to add as padding on each side.
+
+    Returns:
+        np.ndarray: Cropped image region with padding applied.
     """
     h, w = img.shape[:2]
     bbox = resolve_bbox_from_box_array(box, h, w)
@@ -218,12 +273,21 @@ def apply_bbox_crop_optimized(
 
 
 def apply_bbox_crop(img: np.ndarray, ds, idx: int, padding_ratio: float = 0.15) -> np.ndarray:
-    """
-    Legacy wrapper for backward compatibility.
-    DEPRECATED: Use apply_bbox_crop_optimized() with pre-loaded box array.
-    
-    Note: This still loads the box from ds, but avoids double image loading
-    since img is already passed in.
+    """Crop image to bounding box with padding (legacy wrapper).
+
+    .. deprecated::
+        Use apply_bbox_crop_optimized() with pre-loaded box array for
+        better performance.
+
+    Args:
+        img: Input image as numpy array with shape (H, W, C).
+        ds: DeepLake dataset containing 'boxes' tensor.
+        idx: Index of the sample in the dataset.
+        padding_ratio: Fraction of box dimensions to add as padding on each side.
+
+    Returns:
+        np.ndarray: Cropped image region with padding applied, or original
+            image if box loading fails.
     """
     try:
         box = ds["boxes"][idx].numpy()
@@ -268,9 +332,18 @@ def aspect_preserving_resize(img: np.ndarray, target_size: int = 224) -> np.ndar
 # Label index utilities
 
 def build_label_index(ds) -> Dict[int, np.ndarray]:
-    """
-    Build a mapping from class label -> array of dataset indices.
-    Useful for creating few-shot subsets.
+    """Build a mapping from class label to array of dataset indices.
+
+    Iterates through the entire dataset to create an index mapping each
+    unique class label to all sample indices belonging to that class.
+    Useful for creating stratified few-shot subsets.
+
+    Args:
+        ds: DeepLake dataset containing 'labels' tensor.
+
+    Returns:
+        Dict[int, np.ndarray]: Dictionary mapping class IDs to numpy arrays
+            of dataset indices for that class.
     """
     label_to_idxs: Dict[int, list] = defaultdict(list)
     for i, sample in tqdm(enumerate(ds), total=len(ds), desc="Building label index"):
@@ -280,12 +353,28 @@ def build_label_index(ds) -> Dict[int, np.ndarray]:
 
 
 def save_label_index(label_index: Dict[int, np.ndarray], path):
-    """Persist the label index to disk."""
+    """Persist the label index to disk as a compressed numpy archive.
+
+    Args:
+        label_index: Dictionary mapping class IDs to numpy arrays of indices.
+        path: File path for the output .npz file.
+
+    Returns:
+        None
+    """
     np.savez_compressed(path, **{str(k): v for k, v in label_index.items()})
 
 
 def load_label_index(path) -> Dict[int, np.ndarray]:
-    """Load a label index saved by save_label_index."""
+    """Load a label index from disk that was saved by save_label_index.
+
+    Args:
+        path: File path to the .npz file containing the label index.
+
+    Returns:
+        Dict[int, np.ndarray]: Dictionary mapping class IDs to numpy arrays
+            of dataset indices for that class.
+    """
     data = np.load(path)
     return {int(k): data[k] for k in data.files}
 
@@ -371,7 +460,14 @@ def create_fewshot_split(
 
 
 def flatten_indices(indices_dict: Dict[int, np.ndarray]) -> np.ndarray:
-    """Flatten a dict of class->indices to a single array."""
+    """Flatten a dictionary of class-to-indices mappings to a single array.
+
+    Args:
+        indices_dict: Dictionary mapping class IDs to numpy arrays of indices.
+
+    Returns:
+        np.ndarray: 1D array containing all indices from all classes combined.
+    """
     all_indices = []
     for indices in indices_dict.values():
         all_indices.extend(indices)
@@ -379,7 +475,15 @@ def flatten_indices(indices_dict: Dict[int, np.ndarray]) -> np.ndarray:
 
 
 def get_labels_for_indices(ds, indices: np.ndarray) -> np.ndarray:
-    """Get labels for a set of indices."""
+    """Retrieve class labels for a set of dataset indices.
+
+    Args:
+        ds: DeepLake dataset containing 'labels' tensor.
+        indices: Array of dataset indices to retrieve labels for.
+
+    Returns:
+        np.ndarray: 1D array of class labels corresponding to the input indices.
+    """
     indices_list = [int(i) for i in indices]
     labels_np = ds["labels"][indices_list].numpy().astype(int)
     return labels_np.reshape(len(labels_np), -1)[:, 0]
@@ -462,7 +566,14 @@ class MultiBackboneFeatureExtractor:
         )
     
     def _init_resnet50(self):
-        """Initialize ResNet-50 backbone."""
+        """Initialize ResNet-50 backbone with ImageNet-pretrained weights.
+
+        Sets up the model with the final fully connected layer replaced by
+        Identity to output 2048-dimensional embeddings.
+
+        Returns:
+            None
+        """
         weights = models.ResNet50_Weights.IMAGENET1K_V2
         self.model = models.resnet50(weights=weights)
         self.model.fc = nn.Identity()
@@ -470,7 +581,14 @@ class MultiBackboneFeatureExtractor:
         self.embedding_dim = 2048
     
     def _init_efficientnet_b4(self):
-        """Initialize EfficientNet-B4 backbone."""
+        """Initialize EfficientNet-B4 backbone with ImageNet-pretrained weights.
+
+        Sets up the model with the classifier replaced by Identity to output
+        1792-dimensional embeddings.
+
+        Returns:
+            None
+        """
         weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
         self.model = models.efficientnet_b4(weights=weights)
         self.model.classifier = nn.Identity()
@@ -478,7 +596,14 @@ class MultiBackboneFeatureExtractor:
         self.embedding_dim = 1792
     
     def _init_vit_b_16(self):
-        """Initialize Vision Transformer B/16 backbone."""
+        """Initialize Vision Transformer B/16 with ImageNet-pretrained weights.
+
+        Sets up the model with the heads replaced by Identity to output
+        768-dimensional embeddings.
+
+        Returns:
+            None
+        """
         weights = models.ViT_B_16_Weights.IMAGENET1K_V1
         self.model = models.vit_b_16(weights=weights)
         self.model.heads = nn.Identity()
@@ -486,7 +611,16 @@ class MultiBackboneFeatureExtractor:
         self.embedding_dim = 768
     
     def _apply_preprocessing(self, img: np.ndarray, ds=None, idx: int = None) -> np.ndarray:
-        """Apply preprocessing based on mode."""
+        """Apply preprocessing based on the configured mode.
+
+        Args:
+            img: Input image as numpy array with shape (H, W, C).
+            ds: Optional DeepLake dataset for bbox crop mode.
+            idx: Optional sample index for bbox crop mode.
+
+        Returns:
+            np.ndarray: Preprocessed image ready for backbone transforms.
+        """
         if self.preprocess_mode == 'bbox_crop' and ds is not None and idx is not None:
             img = apply_bbox_crop(img, ds, idx, padding_ratio=self.bbox_padding_ratio)
         if self.pad_to_square:
@@ -495,7 +629,16 @@ class MultiBackboneFeatureExtractor:
     
     @torch.no_grad()
     def extract_single(self, image: np.ndarray, ds=None, idx: int = None) -> np.ndarray:
-        """Extract embedding for a single image (H,W,C numpy array)."""
+        """Extract embedding for a single image.
+
+        Args:
+            image: Input image as numpy array with shape (H, W, C).
+            ds: Optional DeepLake dataset for bbox crop preprocessing.
+            idx: Optional sample index for bbox crop preprocessing.
+
+        Returns:
+            np.ndarray: 1D embedding vector of size self.embedding_dim.
+        """
         image = self._apply_preprocessing(image, ds, idx)
         pil_img = Image.fromarray(image)
         tensor = self.preprocess(pil_img).unsqueeze(0).to(self.device)
@@ -504,7 +647,14 @@ class MultiBackboneFeatureExtractor:
     
     @torch.no_grad()
     def extract_batch(self, images: List[np.ndarray]) -> np.ndarray:
-        """Extract embeddings for a batch of images (preprocessing already applied)."""
+        """Extract embeddings for a batch of pre-processed images.
+
+        Args:
+            images: List of preprocessed images as numpy arrays (H, W, C).
+
+        Returns:
+            np.ndarray: 2D array of shape (batch_size, embedding_dim).
+        """
         tensors = torch.stack([
             self.preprocess(Image.fromarray(img)) for img in images
         ]).to(self.device)
@@ -525,7 +675,17 @@ class MultiBackboneFeatureExtractor:
         batch_size: int = 64,
         show_progress: bool = True
     ) -> np.ndarray:
-        """Extract embeddings for specific dataset indices (batched)."""
+        """Extract embeddings for specific dataset indices in batches.
+
+        Args:
+            ds: DeepLake dataset containing images.
+            indices: Array of dataset indices to extract embeddings for.
+            batch_size: Number of images to process per batch.
+            show_progress: Whether to display a progress bar.
+
+        Returns:
+            np.ndarray: 2D array of shape (len(indices), embedding_dim).
+        """
         all_embeddings = []
         iterator = range(0, len(indices), batch_size)
         if show_progress:
@@ -559,11 +719,26 @@ def visualize_preprocessing_modes(
     pad_to_square: bool = True,
     figsize=(18, 12),
 ):
-    """
-    Visualize preprocessing for a given backbone, showing the *actual* images fed into the model.
-    
-    Columns:
-      Original | Native (pad-to-square → weights.transforms()) | Bbox crop (pad) → pad-to-square → weights.transforms() | Bbox on Original
+    """Visualize preprocessing pipelines for a given backbone architecture.
+
+    Creates a comparison grid showing original images alongside their preprocessed
+    versions for both native and bounding box crop modes. Useful for understanding
+    and debugging preprocessing choices.
+
+    Args:
+        ds: DeepLake dataset containing 'images', 'boxes', and 'labels' tensors.
+        indices: List of dataset indices to visualize.
+        backbone_name: Name of the backbone architecture. One of 'resnet50',
+            'efficientnet_b4', or 'vit_b_16'.
+        padding_ratio: Fraction of box dimensions to add as padding for bbox crops.
+        pad_to_square: Whether to pad images to square before backbone transforms.
+        figsize: Figure size as (width, height) tuple.
+
+    Returns:
+        None: Displays matplotlib figure.
+
+    Raises:
+        ValueError: If backbone_name is not one of the supported architectures.
     """
     from PIL import Image
     from torchvision import models
@@ -749,7 +924,7 @@ def visualize_preprocessing_modes(
 
 def evaluate_backbone_fewshot(
     backbone_name: str,
-    preprocess_mode: str,                 # NEW: 'native' or 'bbox_crop'
+    preprocess_mode: str,
     ds: Any,
     val_indices: np.ndarray,
     val_labels: np.ndarray,
@@ -759,8 +934,27 @@ def evaluate_backbone_fewshot(
     max_val_samples: Optional[int] = None,
     cache_dir: Optional[Path] = None
 ) -> Dict:
-    """
-    Evaluate a backbone + preprocessing mode for few-shot classification.
+    """Evaluate a backbone and preprocessing mode for few-shot classification.
+
+    Computes class prototypes from support set embeddings and evaluates
+    classification performance on validation samples using cosine similarity.
+
+    Args:
+        backbone_name: Name of the backbone architecture ('resnet50',
+            'efficientnet_b4', or 'vit_b_16').
+        preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
+        ds: DeepLake dataset containing images and boxes.
+        val_indices: Array of validation sample indices.
+        val_labels: Array of ground truth labels for validation samples.
+        support_indices: Dictionary mapping class IDs to arrays of support indices.
+        device: PyTorch device for computation.
+        batch_size: Batch size for embedding extraction.
+        max_val_samples: Optional limit on number of validation samples to use.
+        cache_dir: Optional directory for caching embeddings.
+
+    Returns:
+        Dict: Dictionary containing evaluation metrics including accuracy,
+            precision, recall, F1 score, and timing information.
     """
     import time
     
@@ -1064,6 +1258,16 @@ class FeatureExtractor:
         self.model = self.model.to(device).eval()
 
     def _ensure_uint8(self, img: np.ndarray) -> np.ndarray:
+        """Convert image to uint8 format if needed.
+
+        Handles both float (0-1 range) and other numeric formats.
+
+        Args:
+            img: Input image array in any numeric format.
+
+        Returns:
+            np.ndarray: Image as uint8 with values in 0-255 range.
+        """
         arr = np.asarray(img)
         if arr.dtype == np.uint8:
             return arr
@@ -1073,6 +1277,14 @@ class FeatureExtractor:
         return np.clip(arr, 0, 255).astype(np.uint8)
 
     def _pad_to_square(self, img: np.ndarray) -> np.ndarray:
+        """Pad image to square using reflection padding.
+
+        Args:
+            img: Input image with shape (H, W, C).
+
+        Returns:
+            np.ndarray: Square image with reflection-padded borders.
+        """
         h, w = img.shape[:2]
         if h == w:
             return img
@@ -1089,6 +1301,16 @@ class FeatureExtractor:
         return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_REFLECT_101)
 
     def _apply_preprocessing(self, img: np.ndarray, ds=None, idx: int = None) -> np.ndarray:
+        """Apply preprocessing pipeline based on configured mode.
+
+        Args:
+            img: Input image as numpy array with shape (H, W, C).
+            ds: Optional DeepLake dataset for bbox crop mode.
+            idx: Optional sample index for bbox crop mode.
+
+        Returns:
+            np.ndarray: Preprocessed image ready for backbone transforms.
+        """
         img = self._ensure_uint8(img)
         if self.preprocess_mode == "bbox_crop" and ds is not None and idx is not None:
             img = apply_bbox_crop(img, ds, idx, padding_ratio=self.bbox_padding_ratio)
@@ -1098,7 +1320,16 @@ class FeatureExtractor:
 
     @torch.no_grad()
     def extract_single(self, image: np.ndarray, ds=None, idx: int = None) -> np.ndarray:
-        """Extract embedding for a single image (H,W,C numpy array)."""
+        """Extract embedding for a single image.
+
+        Args:
+            image: Input image as numpy array with shape (H, W, C).
+            ds: Optional DeepLake dataset for bbox crop preprocessing.
+            idx: Optional sample index for bbox crop preprocessing.
+
+        Returns:
+            np.ndarray: 1D embedding vector of size self.embedding_dim.
+        """
         image = self._apply_preprocessing(image, ds, idx)
         pil_img = Image.fromarray(image)
         tensor = self.preprocess(pil_img).unsqueeze(0).to(self.device)
@@ -1111,7 +1342,14 @@ class FeatureExtractor:
 
     @torch.no_grad()
     def extract_batch(self, images: List[np.ndarray]) -> np.ndarray:
-        """Extract embeddings for a batch of images (preprocessing already applied)."""
+        """Extract embeddings for a batch of pre-processed images.
+
+        Args:
+            images: List of preprocessed images as numpy arrays (H, W, C).
+
+        Returns:
+            np.ndarray: 2D array of shape (batch_size, embedding_dim).
+        """
         tensors = torch.stack([self.preprocess(Image.fromarray(img)) for img in images]).to(self.device)
         if self.device.type == "cuda":
             with torch.amp.autocast("cuda"):
@@ -1128,7 +1366,17 @@ class FeatureExtractor:
         batch_size: int = 64,
         show_progress: bool = True,
     ) -> np.ndarray:
-        """Extract embeddings for specific dataset indices (batched)."""
+        """Extract embeddings for specific dataset indices in batches.
+
+        Args:
+            ds: DeepLake dataset containing images.
+            indices: Array of dataset indices to extract embeddings for.
+            batch_size: Number of images to process per batch.
+            show_progress: Whether to display a progress bar.
+
+        Returns:
+            np.ndarray: 2D array of shape (len(indices), embedding_dim).
+        """
         all_embeddings = []
         iterator = range(0, len(indices), batch_size)
         if show_progress:
@@ -1149,19 +1397,19 @@ def classify_embedding(
     class_ids: np.ndarray,
     metric: str = "cosine"
 ) -> Tuple[int, float, np.ndarray]:
-    """
-    Classify an embedding using nearest prototype.
-    
+    """Classify an embedding using nearest prototype matching.
+
     Args:
-        embedding: (D,) query embedding
-        prototypes: (C, D) class prototypes
-        class_ids: (C,) class IDs
-        metric: "cosine" or "euclidean"
-    
+        embedding: Query embedding vector of shape (D,).
+        prototypes: Class prototype matrix of shape (C, D).
+        class_ids: Array of class IDs of shape (C,).
+        metric: Distance metric, either 'cosine' or 'euclidean'.
+
     Returns:
-        predicted_class: class ID
-        confidence: confidence score (softmax probability)
-        distances: distances to all prototypes
+        Tuple[int, float, np.ndarray]: Tuple containing:
+            - predicted_class: Predicted class ID
+            - confidence: Confidence score (softmax probability)
+            - distances: Distance/similarity to all prototypes
     """
     if metric == "cosine":
         # Cosine similarity (higher = more similar)
@@ -1191,19 +1439,26 @@ def classify_embedding(
 # Fewshotexperiment
 
 class FewShotExperiment:
-    """
-    Manages the iterative few-shot learning experiment with verification.
-    
-    KEY CHANGES from original:
-    1. Uses validation/test splits from TRAINING data for intermediate evaluation
-    2. Keeps ds_val (original validation) completely untouched for final evaluation
-    3. Clearer separation between training pool and evaluation sets
-    
-    This implementation:
-    1. Provides manual verification mode to inspect candidates before adding
-    2. Tracks per-class performance to identify struggling classes
-    3. Gives honest metrics about pseudo-labeling effectiveness
-    4. Focuses on building a labeled dataset for subsequent fine-tuning
+    """Manages iterative few-shot learning experiment with pseudo-labeling.
+
+    This class orchestrates the few-shot learning workflow including:
+    - Managing support set, pool, validation, and test splits
+    - Computing and caching embeddings for efficient prototype computation
+    - Running pseudo-labeling iterations with configurable thresholds
+    - Tracking metrics and history across iterations
+
+    The validation/test splits are derived from training data for intermediate
+    evaluation, while ds_val (original validation set) is kept untouched for
+    final evaluation to prevent data leakage.
+
+    Attributes:
+        ds_train: DeepLake training dataset.
+        support_indices: Dict mapping class IDs to support set indices.
+        pool_indices: Dict mapping class IDs to unlabeled pool indices.
+        val_indices: Dict mapping class IDs to validation indices.
+        test_indices: Dict mapping class IDs to test indices.
+        prototypes: Current class prototype embeddings.
+        history: List of iteration statistics.
     """
     
     def __init__(
@@ -1220,7 +1475,21 @@ class FewShotExperiment:
         batch_size: int = 64,
         use_fp16_embeddings: bool = True,
     ):
+        """Initialize the few-shot experiment.
 
+        Args:
+            ds_train: DeepLake training dataset.
+            support_indices: Dict mapping class IDs to initial support indices.
+            pool_indices: Dict mapping class IDs to unlabeled pool indices.
+            val_indices: Dict mapping class IDs to validation indices.
+            test_indices: Dict mapping class IDs to test indices.
+            extractor: FeatureExtractor instance for embedding computation.
+            n_support: Initial number of support samples per class.
+            seed: Random seed for reproducibility.
+            cache_dir: Directory for caching embeddings.
+            batch_size: Batch size for embedding extraction.
+            use_fp16_embeddings: Whether to save embeddings as float16 for efficiency.
+        """
         self.ds_train = ds_train
         self.extractor = extractor
         self.n_support = n_support
@@ -1295,11 +1564,20 @@ class FewShotExperiment:
         name: str, 
         n_samples: int
     ) -> np.ndarray:
-        """Load embeddings from disk if they exist, otherwise compute and save."""
+        """Load embeddings from cache or compute and save them.
+
+        Args:
+            dataset: DeepLake dataset to extract embeddings from.
+            name: Name identifier for the cache file.
+            n_samples: Total number of samples in the dataset.
+
+        Returns:
+            np.ndarray: 2D array of embeddings with shape (n_samples, embedding_dim).
+        """
         cache_path = self.cache_dir / f"{name}_embeddings.npy"
         
         if cache_path.exists():
-            print(f"⚡ Loading cached {name} embeddings...")
+            print(f"Loading cached {name} embeddings...")
             embeddings = np.load(cache_path)
             # Convert float16 back to float32 for computation
             if embeddings.dtype == np.float16:
@@ -1307,13 +1585,13 @@ class FewShotExperiment:
             print(f"   Loaded {len(embeddings)} embeddings from cache")
             return embeddings
         
-        print(f"🔄 Computing {name} embeddings (one-time, will be cached)...")
+        print(f"Computing {name} embeddings (one-time, will be cached).")
         embeddings = self._extract_with_progress(dataset, n_samples, batch_size=self.batch_size)
         
         # Save as float16 to reduce disk usage by 50%
         if self.use_fp16_embeddings:
             np.save(cache_path, embeddings.astype(np.float16))
-            print(f"💾 Saved as float16 to {cache_path}")
+            print(f"Saved as float16 to {cache_path}")
         else:
             np.save(cache_path, embeddings)
         
@@ -1325,7 +1603,16 @@ class FewShotExperiment:
         n_samples: int, 
         batch_size: int = 64
     ) -> np.ndarray:
-        """Extract embeddings with a progress bar (batched DeepLake reads)."""
+        """Extract embeddings with batched reads and progress bar.
+
+        Args:
+            dataset: DeepLake dataset to extract embeddings from.
+            n_samples: Total number of samples to process.
+            batch_size: Number of samples per batch.
+
+        Returns:
+            np.ndarray: 2D array of embeddings with shape (n_samples, embedding_dim).
+        """
         all_embeddings = []
         n_batches = (n_samples + batch_size - 1) // batch_size
         
@@ -1343,13 +1630,18 @@ class FewShotExperiment:
         return np.vstack(all_embeddings)
     
     def set_final_test_dataset(self, ds_final_test, final_test_indices: Optional[np.ndarray] = None):
-        """Attach the held-out FINAL TEST dataset (DeepLake val split).
+        """Attach the held-out final test dataset for evaluation.
 
-        This is intentionally delayed to avoid accidentally using ds_val during development.
+        Intentionally delayed to avoid accidentally using the final test set
+        during development. Should only be called at the end of the experiment.
 
         Args:
-            ds_final_test: DeepLake dataset for the final evaluation.
-            final_test_indices: Optional array of dataset indices to keep (e.g. duplicates dropped in EDA).
+            ds_final_test: DeepLake dataset for final evaluation.
+            final_test_indices: Optional array of indices to keep (e.g., after
+                dropping duplicates in EDA).
+
+        Returns:
+            bool: True on successful attachment.
         """
         self.ds_final_test = ds_final_test
 
@@ -1376,11 +1668,23 @@ class FewShotExperiment:
         return True
 
     def evaluate_on_final_test(self) -> Dict:
-        """
-        Evaluate current prototypes on the FINAL held-out test dataset (ds_val).
-        
-        This should ONLY be called at the very end of the experiment.
-        Returns accuracy, precision, recall, and f1 on the final test set.
+        """Evaluate current prototypes on the held-out final test dataset.
+
+        Uses cosine similarity between test embeddings and class prototypes
+        for classification. Should only be called at the end of the experiment.
+
+        Returns:
+            Dict: Dictionary containing:
+                - accuracy: Classification accuracy
+                - precision: Macro-averaged precision
+                - recall: Macro-averaged recall
+                - f1: Macro-averaged F1 score
+                - predictions: Array of predicted labels
+                - true_labels: Array of ground truth labels
+
+        Raises:
+            ValueError: If final test dataset has not been attached via
+                set_final_test_dataset().
         """
         if self._final_test_embeddings is None or self._final_test_labels is None:
             raise ValueError(
@@ -1417,7 +1721,14 @@ class FewShotExperiment:
         }
 
     def clear_cache(self):
-        """Clear cached embeddings from disk."""
+        """Clear cached embeddings from disk.
+
+        Removes all cached embedding files from the cache directory and
+        recreates an empty directory.
+
+        Returns:
+            None
+        """
         import shutil
         if self.cache_dir.exists():
             shutil.rmtree(self.cache_dir)
@@ -1425,7 +1736,16 @@ class FewShotExperiment:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
     
     def _compute_prototypes_from_cache(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute prototypes using cached embeddings."""
+        """Compute class prototypes from cached embeddings.
+
+        Computes the mean embedding for each class's support set samples
+        to create class prototypes for nearest-neighbor classification.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: Tuple containing:
+                - prototypes: Array of shape (n_classes, embedding_dim)
+                - class_ids: Array of class IDs in sorted order
+        """
         class_ids = sorted(self.support_indices.keys())
         prototypes = []
         
@@ -1443,7 +1763,15 @@ class FewShotExperiment:
         return np.array(prototypes), np.array(class_ids)
     
     def _update_per_class_stats(self, results: Optional[Dict] = None):
-        """Compute per-class accuracy on validation set (from training data)."""
+        """Update per-class accuracy statistics on validation set.
+
+        Args:
+            results: Optional pre-computed evaluation results. If None,
+                runs evaluation on validation set.
+
+        Returns:
+            None
+        """
         if results is None:
             results = self.evaluate_on_val()
         
@@ -1459,15 +1787,30 @@ class FewShotExperiment:
                 }
     
     def get_support_count(self) -> int:
+        """Get total number of samples in the support set.
+
+        Returns:
+            int: Total count across all classes.
+        """
         return sum(len(v) for v in self.support_indices.values())
     
     def get_pool_count(self) -> int:
+        """Get total number of samples remaining in the unlabeled pool.
+
+        Returns:
+            int: Total count across all classes.
+        """
         return sum(len(v) for v in self.pool_indices.values())
     
     def evaluate_on_val(self) -> Dict:
-        """
-        Evaluate current model on VALIDATION split (from training data).
-        Use this for monitoring during iterative pseudo-labeling.
+        """Evaluate current prototypes on validation split from training data.
+
+        Use this for monitoring performance during iterative pseudo-labeling.
+        Does not touch the final held-out test set.
+
+        Returns:
+            Dict: Dictionary containing accuracy, precision, recall, F1,
+                predictions, true_labels, confidences, and similarities.
         """
         return self._evaluate_on_indices(
             self.val_flat, 
@@ -1477,9 +1820,14 @@ class FewShotExperiment:
         )
     
     def evaluate_on_test(self) -> Dict:
-        """
-        Evaluate on TEST split (from training data).
-        Use this for final evaluation of the pseudo-labeling strategy.
+        """Evaluate current prototypes on test split from training data.
+
+        Use this for evaluating the pseudo-labeling strategy on a held-out
+        portion of the training data (separate from final test set).
+
+        Returns:
+            Dict: Dictionary containing accuracy, precision, recall, F1,
+                predictions, true_labels, confidences, and similarities.
         """
         # Compute test labels from test_indices dict
         test_labels_list = []
@@ -1501,7 +1849,18 @@ class FewShotExperiment:
         embeddings: np.ndarray,
         desc: str = "Evaluating"
     ) -> Dict:
-        """Evaluate on a specific set of indices with all metrics."""
+        """Evaluate classification on a specific set of indices.
+
+        Args:
+            indices: Array of dataset indices to evaluate.
+            labels: Array of ground truth labels for the indices.
+            embeddings: Full embeddings array to index into.
+            desc: Description string for logging.
+
+        Returns:
+            Dict: Dictionary containing accuracy, precision, recall, F1,
+                predictions, true_labels, confidences, and similarities.
+        """
         from sklearn.metrics import precision_score, recall_score, f1_score
         
         # Get embeddings for these indices
@@ -1542,10 +1901,19 @@ class FewShotExperiment:
         threshold: float = 0.8,
         max_per_class: Optional[int] = None
     ) -> Dict[int, List[Dict]]:
-        """
-        Get high-confidence predictions from the unlabeled pool.
-        
-        Returns dict: class_id -> list of {idx, pred_class, confidence, true_class}
+        """Get high-confidence predictions from the unlabeled pool.
+
+        Classifies all pool samples and returns those exceeding the
+        confidence threshold, grouped by predicted class.
+
+        Args:
+            threshold: Minimum confidence score for inclusion.
+            max_per_class: Optional limit on candidates per class.
+
+        Returns:
+            Dict[int, List[Dict]]: Dictionary mapping predicted class IDs to
+                lists of candidate dictionaries with keys: idx, pred_class,
+                confidence, true_class.
         """
         # Flatten pool indices
         pool_flat = flatten_indices(self.pool_indices)
@@ -1596,9 +1964,17 @@ class FewShotExperiment:
         return dict(results)
     
     def add_to_support(self, indices: List[int], class_id: int):
-        """
-        Add samples to the support set for a specific class.
-        Removes them from the pool.
+        """Add samples to the support set for a specific class.
+
+        Adds the specified indices to the support set and removes them
+        from the unlabeled pool. Automatically recomputes prototypes.
+
+        Args:
+            indices: List of dataset indices to add.
+            class_id: Class ID to add the samples to.
+
+        Returns:
+            None
         """
         indices = np.array(indices, dtype=np.int64)
         
@@ -1630,13 +2006,20 @@ class FewShotExperiment:
         max_per_class: int = 5,
         use_true_labels: bool = True
     ) -> Dict:
-        """
-        Run one iteration of pseudo-labeling.
+        """Run one iteration of pseudo-labeling.
 
-        If use_true_labels=True, uses ground truth to filter correct predictions (simulation).
-        If False, all high-confidence predictions are added (real scenario).
+        Finds high-confidence predictions from the pool and adds them to
+        the support set. Can operate in simulation mode (using ground truth)
+        or real mode (accepting all high-confidence predictions).
 
-        Returns iteration statistics.
+        Args:
+            confidence_threshold: Minimum confidence for pseudo-label acceptance.
+            max_per_class: Maximum samples to add per class per iteration.
+            use_true_labels: If True, only accept correct predictions (simulation).
+                If False, accept all high-confidence predictions.
+
+        Returns:
+            Dict: Iteration statistics including n_added, accuracy, support size, etc.
         """
         self.iteration += 1
 
@@ -1721,7 +2104,15 @@ class FewShotExperiment:
         return iteration_stats
     
     def get_worst_classes(self, n: int = 5) -> List[Tuple[int, float]]:
-        """Get the n classes with lowest validation accuracy."""
+        """Get the classes with lowest validation accuracy.
+
+        Args:
+            n: Number of worst-performing classes to return.
+
+        Returns:
+            List[Tuple[int, float]]: List of (class_id, accuracy) tuples
+                sorted by accuracy ascending.
+        """
         class_accs = [
             (cid, stats['accuracy']) 
             for cid, stats in self.per_class_stats.items()
@@ -1730,7 +2121,14 @@ class FewShotExperiment:
         return class_accs[:n]
     
     def print_status(self):
-        """Print current experiment status."""
+        """Print current experiment status summary.
+
+        Displays support set size, pool size, and latest metrics
+        from the most recent iteration.
+
+        Returns:
+            None
+        """
         print(f"\n{'='*50}")
         print(f"ITERATION {self.iteration} STATUS")
         print(f"{'='*50}")
@@ -1749,9 +2147,16 @@ class FewShotExperiment:
         print(f"{'='*50}")
 
     def plot_progress(self, figsize=(14, 5)):
-        """
-        Plot training progress curves showing metrics over iterations.
-        Call this after each iteration to visualize improvement.
+        """Plot training progress curves showing metrics over iterations.
+
+        Creates a 3-panel figure showing: metrics over time, samples added
+        per iteration, and support set growth.
+
+        Args:
+            figsize: Figure size as (width, height) tuple.
+
+        Returns:
+            None: Displays matplotlib figure.
         """
         if not self.history:
             print("No history to plot. Run at least one iteration first.")
@@ -1814,14 +2219,28 @@ class FewShotExperiment:
             print(f"Total samples added: {sum(samples_added)}")
 
     def get_final_support_indices(self) -> set:
-        """Get all indices currently in the support set."""
+        """Get all indices currently in the support set.
+
+        Returns:
+            set: Set of all dataset indices in the support set across all classes.
+        """
         all_indices = set()
         for class_id, indices in self.support_indices.items():
             all_indices.update(int(i) for i in indices)
         return all_indices
 
     def analyze_per_class_performance(self, top_n: int = 10):
-        """Analyze and print per-class performance on validation set."""
+        """Analyze and print per-class performance on validation set.
+
+        Displays the worst and best performing classes with their accuracy,
+        validation count, and support set size.
+
+        Args:
+            top_n: Number of best/worst classes to display.
+
+        Returns:
+            None
+        """
         results = self.evaluate_on_val()
         predictions = results['predictions']
         true_labels = results['true_labels']
@@ -1858,7 +2277,14 @@ class FewShotExperiment:
             print(f"{class_id:>8} {stats['accuracy']*100:>9.1f}% {stats['count']:>10} {stats['support_size']:>10}")
 
     def get_pseudo_labeling_summary(self):
-        """Print a summary of the pseudo-labeling process."""
+        """Print a summary of the pseudo-labeling process.
+
+        Displays total iterations, support set size, pool remaining,
+        total samples added, and accuracy improvement.
+
+        Returns:
+            None
+        """
         print(f"\n{'='*60}")
         print("PSEUDO-LABELING SUMMARY")
         print(f"{'='*60}")
@@ -1876,7 +2302,14 @@ class FewShotExperiment:
         print(f"{'='*60}")
 
     def print_metrics_summary(self):
-        """Print a table of metrics for all iterations."""
+        """Print a table of metrics for all iterations.
+
+        Displays iteration number, accuracy, precision, recall, F1,
+        and samples added for each completed iteration.
+
+        Returns:
+            None
+        """
         if not self.history:
             print("No iterations completed yet.")
             return
@@ -1907,11 +2340,24 @@ class FewShotExperiment:
         use_true_labels: bool = True,
         verbose: bool = True
     ) -> Dict:
-        """
-        Automatically run pseudo-labeling iterations until target accuracy is reached.
+        """Automatically run pseudo-labeling until target accuracy is reached.
 
-        Metrics (accuracy/precision/recall/f1) are evaluated on the TRAIN-SPLIT validation
-        indices (from ds_train), never on ds_val.
+        Iteratively adds high-confidence predictions to the support set,
+        lowering the threshold when no candidates are found.
+
+        Args:
+            target_accuracy: Target validation accuracy to stop at.
+            initial_threshold: Starting confidence threshold.
+            min_threshold: Minimum threshold before stopping.
+            threshold_decay: Amount to reduce threshold when stuck.
+            max_iterations: Maximum iterations to run.
+            max_per_class: Maximum samples to add per class per iteration.
+            use_true_labels: If True, only accept correct predictions (simulation).
+            verbose: Whether to print progress updates.
+
+        Returns:
+            Dict: Summary containing final metrics, iterations run,
+                total samples added, and whether target was reached.
         """
         print(f"\n{'='*70}")
         print("AUTOMATIC PSEUDO-LABELING")
@@ -2524,17 +2970,11 @@ class BatchVerificationSession:
         plt.suptitle(
             "CANDIDATES FOR REVIEW\n"
             "Green = Reference | Blue = Candidate to verify",
-            fontsize=13, fontweight='bold'
+            fontsize=13, fontweight='bold', y=1.02
         )
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.show()
         
-        # Print instructions with decision mapping
-        print("BATCH VERIFICATION INSTRUCTIONS")
-        print("Review the candidates above (grouped by predicted class).")
-        print("Then call: batch.set_decisions([1, 0, 1, ...])")
-        print(f"  Need {len(self.candidates)} decisions (indices #0 to #{len(self.candidates)-1})")
-
 
     def display_class_support(self, class_id: int, n_examples: int = 5):
         """Display support examples for a specific class (for comparison)."""
@@ -2661,9 +3101,21 @@ def show_candidates_for_class(
     n_support: int = 3,
     n_candidates: int = 5
 ):
-    """
-    Display candidates for a specific class alongside support examples.
-    Useful for focused verification on a single class.
+    """Display pseudo-label candidates for a specific class alongside support examples.
+
+    Creates a visualization comparing support set examples with high-confidence
+    candidates from the unlabeled pool for a single class. Useful for focused
+    verification and understanding model predictions.
+
+    Args:
+        experiment: FewShotExperiment instance containing the support set and pool.
+        class_id: The class ID to visualize candidates for.
+        confidence_threshold: Minimum confidence score for candidate inclusion.
+        n_support: Number of support examples to display for reference.
+        n_candidates: Maximum number of candidates to display.
+
+    Returns:
+        List[Dict]: List of candidate dictionaries with idx, confidence, and class info.
     """
     # Get high confidence predictions
     high_conf = experiment.get_high_confidence_predictions(
@@ -2750,10 +3202,23 @@ def spot_check_pseudo_labels(
     n_samples: int = 10,
     seed: int = None
 ) -> Dict:
-    """
-    Display a random sample of recently added pseudo-labels for visual verification.
-    
-    Returns a dict with the samples to review and their ground truth.
+    """Display a random sample of recently added pseudo-labels for visual verification.
+
+    Randomly selects samples from all pseudo-labeled additions and displays them
+    alongside their class reference images. Compares against ground truth to
+    estimate the noise rate in pseudo-labeling.
+
+    Args:
+        experiment: FewShotExperiment instance with pseudo-labeling history.
+        n_samples: Number of random samples to display for verification.
+        seed: Optional random seed for reproducible sampling.
+
+    Returns:
+        Dict: Dictionary containing:
+            - n_checked: Number of samples checked
+            - n_correct: Number of correctly pseudo-labeled samples
+            - error_rate: Fraction of incorrectly labeled samples
+            - samples: List of sample dictionaries with details
     """
     # Get the last iteration's added samples
     if not experiment.history:
@@ -2880,10 +3345,17 @@ def spot_check_pseudo_labels(
 # Efficientnet fine tuning helpers
 
 class DeepLakeEffNetDataset(Dataset):
-    """DeepLake dataset wrapper for EfficientNet-B4 training/eval.
-    
+    """DeepLake dataset wrapper for EfficientNet-B4 training and evaluation.
+
     Supports both torchvision transforms and Albumentations pipelines.
     When custom_aug_pipeline is provided, it takes precedence over train_aug.
+
+    Attributes:
+        ds: DeepLake dataset.
+        indices: Array of dataset indices to use.
+        y: Array of class labels (as consecutive indices 0, 1, 2, ...).
+        preprocess_mode: Either 'native' or 'bbox_crop'.
+        bbox_padding_ratio: Padding ratio for bounding box crops.
     """
 
     def __init__(
@@ -2897,6 +3369,21 @@ class DeepLakeEffNetDataset(Dataset):
         train_aug: bool,
         custom_aug_pipeline: Optional[Any] = None,
     ):
+        """Initialize the dataset wrapper.
+
+        Args:
+            ds: DeepLake dataset containing images and boxes.
+            indices: Array of dataset indices to include.
+            y: Array of class labels (as consecutive indices).
+            weights: Pretrained weights object for preprocessing transforms.
+            preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
+            bbox_padding_ratio: Padding ratio for bounding box crops.
+            train_aug: Whether to apply training augmentations.
+            custom_aug_pipeline: Optional Albumentations pipeline (overrides train_aug).
+
+        Raises:
+            ValueError: If preprocess_mode is not 'native' or 'bbox_crop'.
+        """
         self.ds = ds
         self.indices = np.asarray(indices, dtype=int)
         self.y = np.asarray(y, dtype=int)
@@ -2926,9 +3413,22 @@ class DeepLakeEffNetDataset(Dataset):
             self.tf = base_tf
 
     def __len__(self) -> int:
+        """Return the number of samples in the dataset.
+
+        Returns:
+            int: Number of samples.
+        """
         return len(self.indices)
 
     def __getitem__(self, i: int):
+        """Get a single sample by index.
+
+        Args:
+            i: Index into the dataset (not the original DeepLake index).
+
+        Returns:
+            Tuple[torch.Tensor, int]: Tuple of (image_tensor, class_label).
+        """
         idx = int(self.indices[i])
         sample = self.ds[idx]
         img = sample["images"].numpy()
@@ -2947,11 +3447,20 @@ class DeepLakeEffNetDataset(Dataset):
 
 
 def build_efficientnet_b4(num_classes: int, classifier_dropout: float = 0.3) -> Tuple[nn.Module, object]:
-    """Build EfficientNet-B4 with custom classifier head.
-    
+    """Build EfficientNet-B4 with custom classifier head for fine-tuning.
+
+    Creates an EfficientNet-B4 model pretrained on ImageNet with a replaced
+    classifier head containing dropout for regularization.
+
     Args:
-        num_classes: Number of output classes
-        classifier_dropout: Dropout probability before final layer (reduces overfitting)
+        num_classes: Number of output classes for the classification task.
+        classifier_dropout: Dropout probability before final linear layer
+            to reduce overfitting.
+
+    Returns:
+        Tuple[nn.Module, object]: Tuple containing:
+            - model: EfficientNet-B4 model with custom classifier
+            - weights: Pretrained weights object for preprocessing transforms
     """
     weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
     model = models.efficientnet_b4(weights=weights)
@@ -2964,7 +3473,62 @@ def build_efficientnet_b4(num_classes: int, classifier_dropout: float = 0.3) -> 
     return model, weights
 
 
+def infer_input_image_size_from_weights(weights) -> int:
+    """Infer the expected square input size from a torchvision weights transform preset.
+
+    Prefers `crop_size` when available (common for ImageClassification presets), and falls
+    back to inspecting contained transforms.
+
+    Args:
+        weights: A torchvision weights enum value (e.g. EfficientNet_B4_Weights.IMAGENET1K_V1).
+
+    Returns:
+        int: Expected input size (single integer for square inputs).
+    """
+    preset = weights.transforms()
+
+    crop_size = getattr(preset, "crop_size", None)
+    if crop_size is not None:
+        if isinstance(crop_size, (tuple, list)):
+            return int(crop_size[0])
+        return int(crop_size)
+
+    # Fallback: inspect contained transforms
+    trs = getattr(preset, "transforms", None)
+    if isinstance(trs, (list, tuple)):
+        for tr in trs:
+            if isinstance(tr, transforms.CenterCrop):
+                size = tr.size
+                if isinstance(size, (tuple, list)):
+                    return int(size[0])
+                return int(size)
+            if isinstance(tr, transforms.Resize):
+                size = tr.size
+                if isinstance(size, (tuple, list)):
+                    return int(size[0])
+                return int(size)
+
+    raise ValueError("Could not infer input size from weights.transforms()")
+
+
+def get_effnetb4_input_size() -> int:
+    """Return EfficientNet-B4 pretrained weights input size (square)."""
+    weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
+    return infer_input_image_size_from_weights(weights)
+
+
 def freeze_backbone_effnet(model: nn.Module) -> None:
+    """Freeze all backbone parameters, leaving only classifier trainable.
+
+    Used for transfer learning where the pretrained backbone features are
+    preserved while only the classification head is trained.
+
+    Args:
+        model: EfficientNet model with classifier attribute.
+
+    Returns:
+        None
+    """
     for p in model.parameters():
         p.requires_grad = False
     for p in model.classifier.parameters():
@@ -2972,16 +3536,48 @@ def freeze_backbone_effnet(model: nn.Module) -> None:
 
 
 def unfreeze_all(model: nn.Module) -> None:
+    """Unfreeze all model parameters for full fine-tuning.
+
+    Enables gradient computation for all parameters in the model,
+    allowing the entire network to be trained.
+
+    Args:
+        model: PyTorch model to unfreeze.
+
+    Returns:
+        None
+    """
     for p in model.parameters():
         p.requires_grad = True
 
 
 def _set_bn_eval(m: nn.Module) -> None:
+    """Set BatchNorm layers to evaluation mode.
+
+    Used during training to freeze BatchNorm statistics when fine-tuning
+    with small batch sizes or limited data.
+
+    Args:
+        m: Module to check and potentially set to eval mode.
+
+    Returns:
+        None
+    """
     if isinstance(m, nn.modules.batchnorm._BatchNorm):
         m.eval()
 
 
 def _macro_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
+    """Compute macro-averaged classification metrics.
+
+    Args:
+        y_true: List of ground truth class labels.
+        y_pred: List of predicted class labels.
+
+    Returns:
+        Dict[str, float]: Dictionary containing accuracy, precision, recall,
+            and F1 score (all macro-averaged).
+    """
     prec, rec, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="macro", zero_division=0
     )
@@ -2995,6 +3591,18 @@ def _macro_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
 
 
 def _make_weighted_sampler(y: np.ndarray) -> WeightedRandomSampler:
+    """Create a weighted random sampler for class-balanced training.
+
+    Computes inverse class frequency weights to oversample minority classes
+    and undersample majority classes during training.
+
+    Args:
+        y: Array of class labels for the training set.
+
+    Returns:
+        WeightedRandomSampler: Sampler that yields samples with probability
+            inversely proportional to their class frequency.
+    """
     y = np.asarray(y, dtype=int)
     counts = np.bincount(y)
     counts[counts == 0] = 1
@@ -3008,6 +3616,17 @@ def _make_weighted_sampler(y: np.ndarray) -> WeightedRandomSampler:
 
 
 def _make_loader(ds: Dataset, batch_size: int, shuffle: bool, sampler=None) -> DataLoader:
+    """Create a DataLoader with standard configuration.
+
+    Args:
+        ds: PyTorch Dataset to load data from.
+        batch_size: Number of samples per batch.
+        shuffle: Whether to shuffle data (ignored if sampler is provided).
+        sampler: Optional sampler for custom sampling strategy.
+
+    Returns:
+        DataLoader: Configured DataLoader for training or evaluation.
+    """
     return DataLoader(
         ds,
         batch_size=max(1, int(batch_size)),
@@ -3020,6 +3639,20 @@ def _make_loader(ds: Dataset, batch_size: int, shuffle: bool, sampler=None) -> D
 
 @torch.no_grad()
 def evaluate_with_preds(model: nn.Module, loader: DataLoader, device: torch.device, criterion: nn.Module):
+    """Evaluate model and return predictions along with metrics.
+
+    Args:
+        model: PyTorch model to evaluate.
+        loader: DataLoader providing evaluation batches.
+        device: Device to run evaluation on.
+        criterion: Loss function for computing evaluation loss.
+
+    Returns:
+        Tuple[Dict[str, float], List[int], List[int]]: Tuple containing:
+            - metrics: Dictionary with loss, accuracy, precision, recall, F1
+            - y_true: List of ground truth labels
+            - y_pred: List of predicted labels
+    """
     model.eval()
     total_loss = 0.0
     n = 0
@@ -3053,7 +3686,26 @@ def train_one_epoch(
     desc: str = "Training",
     scheduler: Optional[Any] = None,
 ):
-    """Train for one epoch with optional LR scheduler (per-batch stepping)."""
+    """Train model for one epoch with optional mixed precision and LR scheduling.
+
+    Performs a single training epoch with gradient clipping, optional automatic
+    mixed precision (AMP), and optional per-batch learning rate scheduling.
+
+    Args:
+        model: PyTorch model to train.
+        loader: DataLoader providing training batches.
+        device: Device to run training on.
+        criterion: Loss function for computing training loss.
+        optimizer: Optimizer for updating model parameters.
+        amp: Whether to use automatic mixed precision training.
+        grad_clip_norm: Maximum gradient norm for gradient clipping.
+        desc: Description string for the progress bar.
+        scheduler: Optional LR scheduler for per-batch learning rate updates.
+
+    Returns:
+        Dict[str, float]: Dictionary containing training metrics (loss, accuracy,
+            precision, recall, F1).
+    """
     model.train()
     scaler = torch.amp.GradScaler("cuda") if (amp and device.type == "cuda") else None
     total_loss = 0.0
@@ -3104,6 +3756,19 @@ def train_one_epoch(
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, criterion: nn.Module, desc: str = "Evaluating"):
+    """Evaluate model on a dataset and compute metrics.
+
+    Args:
+        model: PyTorch model to evaluate.
+        loader: DataLoader providing evaluation batches.
+        device: Device to run evaluation on.
+        criterion: Loss function for computing evaluation loss.
+        desc: Description string for the progress bar.
+
+    Returns:
+        Dict[str, float]: Dictionary containing evaluation metrics
+            (loss, accuracy, precision, recall, F1).
+    """
     model.eval()
     total_loss = 0.0
     n = 0
@@ -3165,6 +3830,20 @@ class TrainConfig:
     device: str = "auto"
     out_dir: str = "runs"
 
+
+@dataclass
+class EffnetTrainingState:
+    """Minimal state to resume EfficientNet-B4 training without re-splitting or re-training head."""
+
+    class_ids: List[int]
+    train_idx: np.ndarray
+    train_y: np.ndarray
+    val_idx: np.ndarray
+    val_y: np.ndarray
+    test_idx: np.ndarray
+    test_y: np.ndarray
+    model_state: Dict[str, torch.Tensor]
+
 def train_two_stage_effnetb4(
     cfg: TrainConfig,
     ds_train,
@@ -3172,50 +3851,92 @@ def train_two_stage_effnetb4(
     *,
     val_frac: float = 0.15,
     test_frac: float = 0.15,
+    init_state: Optional[EffnetTrainingState] = None,
+    return_state: bool = False,
 ):
-    """Two-stage training on the provided label_index (expanded support set)."""
+    """Two-stage training of EfficientNet-B4 on few-shot expanded support set.
+
+    Implements a two-stage training strategy:
+    1. Head-only training: Freeze backbone, train only classifier
+    2. Full fine-tuning: Unfreeze all layers, train with lower backbone LR
+
+    Includes early stopping, LR scheduling, and weighted sampling for
+    class-imbalanced datasets.
+
+    Args:
+        cfg: TrainConfig dataclass containing all training hyperparameters.
+        ds_train: DeepLake training dataset.
+        train_label_index: Dictionary mapping class IDs to arrays of training indices.
+        val_frac: Fraction of data to use for validation (stratified by class).
+        test_frac: Fraction of data to use for testing (stratified by class).
+
+    Returns:
+        Tuple containing:
+            - model: Trained EfficientNet-B4 model
+            - hist_df: DataFrame with training history (loss, metrics per epoch)
+            - summary: Dictionary with final test metrics and run info
+            - out_dir: Path to output directory with saved artifacts
+    """
     import pandas as pd
 
     seed_everything(cfg.seed)
     device = torch.device(get_device() if cfg.device == "auto" else cfg.device)
 
-    class_ids = sorted(int(k) for k in train_label_index.keys())
-    class_id_to_idx = {cid: i for i, cid in enumerate(class_ids)}
+    if init_state is None:
+        class_ids = sorted(int(k) for k in train_label_index.keys())
+        class_id_to_idx = {cid: i for i, cid in enumerate(class_ids)}
 
-    # Simple stratified split within the support label_index
-    rng = np.random.default_rng(cfg.seed)
-    train_idx, train_y = [], []
-    val_idx, val_y = [], []
-    test_idx, test_y = [], []
+        # Simple stratified split within the support label_index
+        rng = np.random.default_rng(cfg.seed)
+        train_idx, train_y = [], []
+        val_idx, val_y = [], []
+        test_idx, test_y = [], []
 
-    for cid in class_ids:
-        idxs = np.asarray(train_label_index[cid], dtype=int).copy()
-        if idxs.size == 0:
-            continue
-        rng.shuffle(idxs)
+        for cid in class_ids:
+            idxs = np.asarray(train_label_index[cid], dtype=int).copy()
+            if idxs.size == 0:
+                continue
+            rng.shuffle(idxs)
 
-        n = len(idxs)
-        n_val = max(1, int(round(val_frac * n))) if n >= 3 else (1 if n == 2 else 0)
-        n_test = max(1, int(round(test_frac * n))) if n >= 4 else (0 if n <= 3 else 1)
-        n_train = max(1, n - n_val - n_test)
+            n = len(idxs)
+            n_val = max(1, int(round(val_frac * n))) if n >= 3 else (1 if n == 2 else 0)
+            n_test = max(1, int(round(test_frac * n))) if n >= 4 else (0 if n <= 3 else 1)
+            n_train = max(1, n - n_val - n_test)
 
-        tr = idxs[:n_train]
-        va = idxs[n_train : n_train + n_val]
-        te = idxs[n_train + n_val : n_train + n_val + n_test]
+            tr = idxs[:n_train]
+            va = idxs[n_train : n_train + n_val]
+            te = idxs[n_train + n_val : n_train + n_val + n_test]
 
-        y = class_id_to_idx[cid]
-        train_idx.extend(tr.tolist())
-        train_y.extend([y] * len(tr))
-        val_idx.extend(va.tolist())
-        val_y.extend([y] * len(va))
-        test_idx.extend(te.tolist())
-        test_y.extend([y] * len(te))
+            y = class_id_to_idx[cid]
+            train_idx.extend(tr.tolist())
+            train_y.extend([y] * len(tr))
+            val_idx.extend(va.tolist())
+            val_y.extend([y] * len(va))
+            test_idx.extend(te.tolist())
+            test_y.extend([y] * len(te))
+    else:
+        class_ids = [int(x) for x in init_state.class_ids]
+        train_idx = init_state.train_idx.tolist()
+        train_y = init_state.train_y.tolist()
+        val_idx = init_state.val_idx.tolist()
+        val_y = init_state.val_y.tolist()
+        test_idx = init_state.test_idx.tolist()
+        test_y = init_state.test_y.tolist()
+
+        expected_class_ids = sorted(int(k) for k in train_label_index.keys())
+        if expected_class_ids and sorted(class_ids) != expected_class_ids:
+            raise ValueError(
+                "init_state.class_ids does not match train_label_index keys; "
+                "provide a matching state or omit init_state."
+            )
 
     model, weights = build_efficientnet_b4(
         num_classes=len(class_ids),
         classifier_dropout=cfg.classifier_dropout,
     )
     model = model.to(device)
+    if init_state is not None:
+        model.load_state_dict(init_state.model_state, strict=True)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
 
@@ -3406,9 +4127,35 @@ def train_two_stage_effnetb4(
         "out_dir": str(out_dir),
     }
 
-    return model, hist_df, summary, out_dir
+    if not return_state:
+        return model, hist_df, summary, out_dir
+
+    cpu_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+    state = EffnetTrainingState(
+        class_ids=[int(c) for c in class_ids],
+        train_idx=np.asarray(train_idx, dtype=int),
+        train_y=np.asarray(train_y, dtype=int),
+        val_idx=np.asarray(val_idx, dtype=int),
+        val_y=np.asarray(val_y, dtype=int),
+        test_idx=np.asarray(test_idx, dtype=int),
+        test_y=np.asarray(test_y, dtype=int),
+        model_state=cpu_state,
+    )
+    return model, hist_df, summary, out_dir, state
 
 def plot_training_curves(hist_df) -> None:
+    """Plot training and validation loss/accuracy curves.
+
+    Creates a two-panel figure showing loss curves and accuracy/F1 curves
+    across training epochs.
+
+    Args:
+        hist_df: DataFrame containing training history with columns for
+            train_loss, val_loss, train_acc, val_acc, train_f1, val_f1.
+
+    Returns:
+        None: Displays matplotlib figure.
+    """
     import matplotlib.pyplot as plt
 
     if hist_df is None or len(hist_df) == 0:
@@ -3438,7 +4185,18 @@ def plot_training_curves(hist_df) -> None:
     plt.show()
 
 def build_label_index_from_support(exp: FewShotExperiment) -> dict:
-    """Return {class_id: np.ndarray(indices)} for the current expanded support set."""
+    """Build a label index from the current expanded support set.
+
+    Extracts the support indices from a FewShotExperiment into a format
+    suitable for training (same format as build_label_index).
+
+    Args:
+        exp: FewShotExperiment instance containing the support set.
+
+    Returns:
+        Dict[int, np.ndarray]: Dictionary mapping class IDs to numpy arrays
+            of support set indices. Classes with no support samples are excluded.
+    """
     return {
         int(cid): np.asarray(idxs, dtype=int)
         for cid, idxs in exp.support_indices.items()
@@ -3446,6 +4204,18 @@ def build_label_index_from_support(exp: FewShotExperiment) -> dict:
     }
 
 def _map_class_ids_to_train_y(class_ids, y_class_id: np.ndarray) -> np.ndarray:
+    """Map class IDs to consecutive training indices (0, 1, 2, ...).
+
+    Converts arbitrary class IDs to a contiguous range starting from 0,
+    which is required for PyTorch CrossEntropyLoss.
+
+    Args:
+        class_ids: List or array of unique class IDs in the dataset.
+        y_class_id: Array of class IDs to convert.
+
+    Returns:
+        np.ndarray: Array of training indices corresponding to the input class IDs.
+    """
     class_id_to_idx = {int(cid): i for i, cid in enumerate(class_ids)}
     return np.asarray([class_id_to_idx[int(c)] for c in y_class_id], dtype=int)
 
@@ -3459,6 +4229,22 @@ def evaluate_effnet_on_indices(
     bbox_padding_ratio: float = 0.15,
     batch_size: int = 32,
 ):
+    """Evaluate a trained EfficientNet model on specific dataset indices.
+
+    Args:
+        model: Trained EfficientNet model.
+        ds: DeepLake dataset containing images and boxes.
+        indices: Array of dataset indices to evaluate on.
+        y_class_id: Array of ground truth class IDs for the indices.
+        class_ids: List of all class IDs used during training.
+        preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
+        bbox_padding_ratio: Padding ratio for bounding box crops.
+        batch_size: Batch size for evaluation.
+
+    Returns:
+        Dict[str, float]: Dictionary containing evaluation metrics
+            (loss, accuracy, precision, recall, F1).
+    """
     weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
     y = _map_class_ids_to_train_y(class_ids, y_class_id)
     ds_eval = DeepLakeEffNetDataset(
@@ -3479,7 +4265,27 @@ def evaluate_effnet_on_indices(
     criterion = torch.nn.CrossEntropyLoss()
 
 class _PoolInferenceDataset(Dataset):
+    """Dataset for running inference on pool samples during pseudo-labeling.
+
+    A lightweight Dataset wrapper that applies EfficientNet preprocessing
+    to pool samples for inference without augmentation.
+
+    Attributes:
+        ds: DeepLake dataset containing images and boxes.
+        indices: Array of pool indices to run inference on.
+        preprocess_mode: Either 'native' or 'bbox_crop'.
+        bbox_padding_ratio: Padding ratio for bounding box crops.
+    """
+
     def __init__(self, ds, indices: np.ndarray, preprocess_mode: str, bbox_padding_ratio: float):
+        """Initialize the pool inference dataset.
+
+        Args:
+            ds: DeepLake dataset containing images and boxes.
+            indices: Array of pool indices for inference.
+            preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
+            bbox_padding_ratio: Padding ratio for bounding box crops.
+        """
         self.ds = ds
         self.indices = np.asarray(indices, dtype=int)
         self.preprocess_mode = str(preprocess_mode)
@@ -3514,7 +4320,32 @@ def pseudo_label_pool_with_effnet(
     bbox_padding_ratio: float = 0.15,
     use_true_labels: bool = True,
 ):
-    """Pseudo-label the remaining pool with a fine-tuned EfficientNet and add to support."""
+    """Pseudo-label the remaining pool using a fine-tuned EfficientNet model.
+
+    Uses the trained model to make predictions on unlabeled pool samples.
+    High-confidence predictions are added to the support set for further
+    training iterations.
+
+    Args:
+        exp: FewShotExperiment instance managing the support set and pool.
+        model: Trained EfficientNet model for making predictions.
+        ds: DeepLake dataset containing images and boxes.
+        class_ids: List of class IDs the model was trained on.
+        confidence_threshold: Minimum confidence score for pseudo-label acceptance.
+        max_per_class: Maximum number of samples to add per class per iteration.
+        batch_size: Batch size for inference.
+        preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
+        bbox_padding_ratio: Padding ratio for bounding box crops.
+        use_true_labels: If True, only accept pseudo-labels that match ground truth
+            (simulation mode). If False, accept all high-confidence predictions.
+
+    Returns:
+        Dict: Dictionary containing:
+            - n_candidates: Number of high-confidence candidates found
+            - n_added: Number of samples added to support set
+            - n_correct: Number of correctly pseudo-labeled samples
+            - n_wrong: Number of incorrectly pseudo-labeled samples
+    """
     pool_flat = flatten_indices(exp.pool_indices)
     if len(pool_flat) == 0:
         print("Pool is empty.")
@@ -3585,6 +4416,5 @@ def pseudo_label_pool_with_effnet(
     print(f"Added: {n_added} | Correct: {n_correct} | Wrong: {n_wrong}")
     print(f"New support size: {exp.get_support_count()} | Pool remaining: {exp.get_pool_count()}")
     return {"n_candidates": n_candidates, "n_added": n_added, "n_correct": n_correct, "n_wrong": n_wrong}
-
 
 
