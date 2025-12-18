@@ -34,7 +34,7 @@ import deeplake
 import cv2
 import random
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -1899,16 +1899,26 @@ class FewShotExperiment:
     def get_high_confidence_predictions(
         self,
         threshold: float = 0.8,
-        max_per_class: Optional[int] = None
+        max_per_class: Optional[int] = None,
+        *,
+        margin_threshold: Optional[float] = None,
+        mutual_nn_k: Optional[int] = None,
     ) -> Dict[int, List[Dict]]:
         """Get high-confidence predictions from the unlabeled pool.
 
         Classifies all pool samples and returns those exceeding the
         confidence threshold, grouped by predicted class.
 
+        Optional filters:
+        - margin_threshold: require p(top1) - p(top2) >= margin_threshold.
+        - mutual_nn_k: mutual nearest-neighbor style filter; keep a sample only if it is
+          among the top-K most similar pool samples to its predicted class prototype.
+
         Args:
             threshold: Minimum confidence score for inclusion.
             max_per_class: Optional limit on candidates per class.
+            margin_threshold: Optional minimum probability margin between top-1 and top-2.
+            mutual_nn_k: Optional K for mutual nearest-neighbor filter.
 
         Returns:
             Dict[int, List[Dict]]: Dictionary mapping predicted class IDs to
@@ -1935,12 +1945,42 @@ class FewShotExperiment:
         pred_indices = np.argmax(similarities, axis=1)
         predictions = self.class_ids[pred_indices]
         confidences = np.max(probs, axis=1)
+
+        # Top-2 margin in probability space
+        if margin_threshold is not None:
+            # sort descending per row, take top2
+            top2 = np.partition(probs, kth=-2, axis=1)[:, -2:]
+            # partition doesn't order; recover top1/top2 as max/2nd max
+            p2 = np.min(top2, axis=1)
+            p1 = np.max(top2, axis=1)
+            margins = p1 - p2
+        else:
+            margins = None
+
+        # Mutual NN filter: sample must also be close to the prototype from the prototype's viewpoint
+        if mutual_nn_k is not None and int(mutual_nn_k) > 0:
+            k = int(mutual_nn_k)
+            n_pool = similarities.shape[0]
+            k = min(k, n_pool)
+            # Build (predicted_class_id -> set(dataset_idx)) of top-K samples for each prototype
+            topk_by_class: Dict[int, set[int]] = {}
+            for proto_col, class_id in enumerate(self.class_ids):
+                col = similarities[:, proto_col]
+                if k == n_pool:
+                    top_pos = np.arange(n_pool, dtype=int)
+                else:
+                    top_pos = np.argpartition(col, kth=n_pool - k)[n_pool - k :]
+                topk_by_class[int(class_id)] = set(int(pool_flat[p]) for p in top_pos)
+        else:
+            topk_by_class = None
         
         # Get true labels for evaluation
         true_labels = get_labels_for_indices(self.ds_train, pool_flat)
         
         # Filter by confidence threshold
         high_conf_mask = confidences >= threshold
+        if margins is not None:
+            high_conf_mask = high_conf_mask & (margins >= float(margin_threshold))
         
         # Organize by predicted class
         results = defaultdict(list)
@@ -1948,11 +1988,16 @@ class FewShotExperiment:
             zip(high_conf_mask, predictions, confidences, true_labels)
         ):
             if is_high_conf:
+                if topk_by_class is not None:
+                    ds_idx = int(pool_flat[i])
+                    if ds_idx not in topk_by_class.get(int(pred_class), set()):
+                        continue
                 results[int(pred_class)].append({
                     'idx': int(pool_flat[i]),
                     'pred_class': int(pred_class),
                     'confidence': float(conf),
-                    'true_class': int(true_label)
+                    'true_class': int(true_label),
+                    'margin': float(margins[i]) if margins is not None else None,
                 })
         
         # Sort by confidence and limit per class
@@ -2004,7 +2049,10 @@ class FewShotExperiment:
         self,
         confidence_threshold: float = 0.8,
         max_per_class: int = 5,
-        use_true_labels: bool = True
+        use_true_labels: bool = True,
+        *,
+        margin_threshold: Optional[float] = None,
+        mutual_nn_k: Optional[int] = None,
     ) -> Dict:
         """Run one iteration of pseudo-labeling.
 
@@ -2026,7 +2074,9 @@ class FewShotExperiment:
         # Get high-confidence predictions
         high_conf = self.get_high_confidence_predictions(
             threshold=confidence_threshold,
-            max_per_class=max_per_class
+            max_per_class=max_per_class,
+            margin_threshold=margin_threshold,
+            mutual_nn_k=mutual_nn_k,
         )
 
         n_candidates = sum(len(v) for v in high_conf.values())
@@ -2073,6 +2123,8 @@ class FewShotExperiment:
         iteration_stats = {
             'iteration': self.iteration,
             'threshold_used': float(confidence_threshold),
+            'margin_threshold_used': float(margin_threshold) if margin_threshold is not None else None,
+            'mutual_nn_k_used': int(mutual_nn_k) if mutual_nn_k is not None else None,
 
             # candidates / adds
             'n_candidates': int(n_candidates),
@@ -4314,6 +4366,7 @@ def pseudo_label_pool_with_effnet(
     ds,
     class_ids,
     confidence_threshold: float = 0.95,
+    margin_threshold: Optional[float] = None,
     max_per_class: int = 10,
     batch_size: int = 64,
     preprocess_mode: str = "bbox_crop",
@@ -4332,6 +4385,7 @@ def pseudo_label_pool_with_effnet(
         ds: DeepLake dataset containing images and boxes.
         class_ids: List of class IDs the model was trained on.
         confidence_threshold: Minimum confidence score for pseudo-label acceptance.
+        margin_threshold: Optional minimum probability margin p(top1)-p(top2) for acceptance.
         max_per_class: Maximum number of samples to add per class per iteration.
         batch_size: Batch size for inference.
         preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
@@ -4372,15 +4426,35 @@ def pseudo_label_pool_with_effnet(
         x = x.to(device)
         logits = model(x)
         probs = torch.softmax(logits, dim=1)
-        conf, pred = probs.max(dim=1)
+        top2_prob, top2_idx = probs.topk(k=2, dim=1)
+        conf = top2_prob[:, 0]
+        pred = top2_idx[:, 0]
+        if margin_threshold is not None:
+            margin = top2_prob[:, 0] - top2_prob[:, 1]
+        else:
+            margin = None
 
         conf = conf.detach().cpu().numpy()
         pred = pred.detach().cpu().numpy()
         idxs = idxs.detach().cpu().numpy()
+        if margin is not None:
+            margin = margin.detach().cpu().numpy()
 
-        for idx, p, c in zip(idxs, pred, conf):
+        if margin is None:
+            it = zip(idxs, pred, conf)
+        else:
+            it = zip(idxs, pred, conf, margin)
+
+        for row in it:
+            if margin is None:
+                idx, p, c = row
+                m = None
+            else:
+                idx, p, c, m = row
             c = float(c)
             if c < confidence_threshold:
+                continue
+            if m is not None and float(m) < float(margin_threshold):
                 continue
             pred_class_id = int(class_ids[int(p)])
             true_class_id = int(ds["labels"][int(idx)].numpy().squeeze())
@@ -4418,3 +4492,127 @@ def pseudo_label_pool_with_effnet(
     return {"n_candidates": n_candidates, "n_added": n_added, "n_correct": n_correct, "n_wrong": n_wrong}
 
 
+def run_iterative_effnet_self_training(
+    exp: FewShotExperiment,
+    *,
+    ds_train,
+    cfg: TrainConfig,
+    rounds: int = 3,
+    pseudo_confidence_threshold: float = 0.95,
+    pseudo_margin_threshold: Optional[float] = None,
+    max_per_class: int = 10,
+    preprocess_mode: Optional[str] = None,
+    bbox_padding_ratio: Optional[float] = None,
+    use_true_labels: bool = True,
+) -> pd.DataFrame:
+    """Train an EfficientNet head on expanded support, then add more pseudo-labels and re-evaluate.
+
+    Intended workflow:
+    1) Expand support a bit (e.g., prototype pseudo-labeling)
+    2) Train EfficientNet on the current (small) expanded support
+    3) Use the trained model to pseudo-label more pool samples
+    4) Repeat for a few rounds and track metrics on exp's fixed val/test splits
+
+    Args:
+        exp: FewShotExperiment that owns the current support/pool split.
+        ds_train: DeepLake training dataset.
+        cfg: TrainConfig for EfficientNet training.
+        rounds: Number of self-training rounds to run.
+        pseudo_confidence_threshold: Confidence threshold for pseudo-label acceptance.
+        pseudo_margin_threshold: Optional margin threshold p(top1)-p(top2) for pseudo-label acceptance.
+        max_per_class: Max pseudo-labeled additions per class per round.
+        preprocess_mode: Optional override for preprocessing mode; defaults to cfg.preprocess_mode.
+        bbox_padding_ratio: Optional override for bbox padding; defaults to cfg.bbox_padding_ratio.
+        use_true_labels: If True, simulation mode (reject incorrect pseudo-labels using ground truth).
+
+    Returns:
+        pd.DataFrame: Per-round metrics (EffNet eval on exp.val/test and pseudo-label stats).
+    """
+    rows: List[Dict[str, Any]] = []
+
+    # Build fixed evaluation labels for exp's splits
+    val_idx = np.asarray(exp.val_flat, dtype=int)
+    val_y = np.asarray(getattr(exp, "_val_labels"), dtype=int)
+    test_idx = np.asarray(exp.test_flat, dtype=int)
+    test_y = get_labels_for_indices(ds_train, test_idx) if len(test_idx) else np.asarray([], dtype=int)
+
+    pmode = str(preprocess_mode) if preprocess_mode is not None else str(cfg.preprocess_mode)
+    bpad = float(bbox_padding_ratio) if bbox_padding_ratio is not None else float(cfg.bbox_padding_ratio)
+
+    for r in range(1, int(rounds) + 1):
+        support_label_index = build_label_index_from_support(exp)
+        if not support_label_index:
+            raise ValueError("Support set is empty; cannot train EfficientNet.")
+
+        cfg_round = replace(cfg, run_name=f"{cfg.run_name}_round{r:02d}")
+        model, hist_df, summary, out_dir = train_two_stage_effnetb4(
+            cfg_round,
+            ds_train,
+            support_label_index,
+        )
+
+        class_ids = summary["class_ids"]
+        val_m = (
+            evaluate_effnet_on_indices(
+                model,
+                ds_train,
+                val_idx,
+                val_y,
+                class_ids,
+                preprocess_mode=pmode,
+                bbox_padding_ratio=bpad,
+                batch_size=max(8, int(cfg.batch_size)),
+            )
+            if len(val_idx)
+            else {}
+        )
+        test_m = (
+            evaluate_effnet_on_indices(
+                model,
+                ds_train,
+                test_idx,
+                test_y,
+                class_ids,
+                preprocess_mode=pmode,
+                bbox_padding_ratio=bpad,
+                batch_size=max(8, int(cfg.batch_size)),
+            )
+            if len(test_idx)
+            else {}
+        )
+
+        pl = pseudo_label_pool_with_effnet(
+            exp,
+            model,
+            ds=ds_train,
+            class_ids=class_ids,
+            confidence_threshold=pseudo_confidence_threshold,
+            margin_threshold=pseudo_margin_threshold,
+            max_per_class=max_per_class,
+            batch_size=max(16, int(cfg.batch_size)),
+            preprocess_mode=pmode,
+            bbox_padding_ratio=bpad,
+            use_true_labels=use_true_labels,
+        )
+
+        rows.append(
+            {
+                "round": r,
+                "support_size": int(exp.get_support_count()),
+                "pool_size": int(exp.get_pool_count()),
+                "val_acc": float(val_m.get("acc", float("nan"))) if val_m else float("nan"),
+                "val_f1": float(val_m.get("f1", float("nan"))) if val_m else float("nan"),
+                "test_acc": float(test_m.get("acc", float("nan"))) if test_m else float("nan"),
+                "test_f1": float(test_m.get("f1", float("nan"))) if test_m else float("nan"),
+                "pseudo_n_candidates": int(pl.get("n_candidates", 0)),
+                "pseudo_added": int(pl.get("n_added", 0)),
+                "pseudo_correct": int(pl.get("n_correct", 0)),
+                "pseudo_wrong": int(pl.get("n_wrong", 0)),
+                "run_dir": str(out_dir),
+            }
+        )
+
+        if int(pl.get("n_added", 0)) == 0:
+            break
+
+    return pd.DataFrame(rows)
