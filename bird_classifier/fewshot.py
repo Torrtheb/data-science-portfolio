@@ -737,7 +737,7 @@ def visualize_preprocessing_modes(
     plt.tight_layout()
     plt.show()
     
-    print("\n📊 Preprocessing Summary:")
+    print("\n Preprocessing Summary:")
     print(f"  • Backbone: {backbone_name}")
     print(f"  • Pad-to-square before transforms: {pad_to_square}")
     print("  • Display: de-normalized for visualization")
@@ -985,7 +985,7 @@ def evaluate_backbone_fewshot(
         "n_val_dropped": n_val_dropped,
     }
     
-    print(f"\n📊 RESULTS for {config_name}:")
+    print(f"\n RESULTS for {config_name}:")
     print(f"   Accuracy:   {accuracy*100:.2f}%")
     print(f"   F1 Score:   {f1*100:.2f}%")
     print(f"   Time:       {elapsed_time:.1f}s")
@@ -2459,7 +2459,7 @@ class BatchVerificationSession:
             print("No candidates found at this threshold.")
             return
         
-        print(f"Displaying {len(self.candidates)} candidates across {len(candidates_by_class)} classes...\n")
+        print(f"Displaying {len(self.candidates)} candidates across {len(candidates_by_class)} classes: \n")
         
         # Display: one row per class, +1 column for reference image
         n_rows = len(candidates_by_class)
@@ -2530,17 +2530,12 @@ class BatchVerificationSession:
         plt.show()
         
         # Print instructions with decision mapping
-        print("\n" + "="*60)
         print("BATCH VERIFICATION INSTRUCTIONS")
-        print("="*60)
         print("Review the candidates above (grouped by predicted class).")
         print("Then call: batch.set_decisions([1, 0, 1, ...])")
         print(f"  Need {len(self.candidates)} decisions (indices #0 to #{len(self.candidates)-1})")
-        print("  1 = Accept (add to training set)")
-        print("  0 = Reject (don't add)")
-        print(f"  Need {len(self.candidates)} decisions")
-        print("="*60)
-    
+
+
     def display_class_support(self, class_id: int, n_examples: int = 5):
         """Display support examples for a specific class (for comparison)."""
         support_indices = self.experiment.support_indices.get(class_id, [])
@@ -2645,7 +2640,6 @@ class BatchVerificationSession:
         print(f"    Precision: {results_before['precision']*100:.2f}% → {results_after['precision']*100:.2f}%")
         print(f"    Recall:    {results_before['recall']*100:.2f}% → {results_after['recall']*100:.2f}%")
         print(f"    F1 Score:  {results_before['f1']*100:.2f}% → {results_after['f1']*100:.2f}%")
-        print(f"{'='*60}")
 
         return {
             "added": samples_added,
@@ -2785,10 +2779,10 @@ def spot_check_pseudo_labels(
     samples_to_check = [all_added[i] for i in sample_indices]
     
     print(f"{'='*70}")
-    print(f"SPOT-CHECK: {n_to_check} Random Pseudo-Labels (out of {len(all_added)} total)")
+    print(f"Spot check: {n_to_check} Random Pseudo-Labels (out of {len(all_added)} total)")
     print(f"{'='*70}")
     print("Compare each candidate (blue) with the reference image (green).")
-    print("The ground truth (✓/✗) is revealed below each candidate.\n")
+    print("The ground truth (green/red) is revealed below each candidate.\n")
     
     # Display in a grid: 2 columns per sample (reference + candidate)
     n_cols = min(5, n_to_check)  # Max 5 pairs per row
@@ -2859,28 +2853,21 @@ def spot_check_pseudo_labels(
     
     # Summary statistics
     error_rate = 1 - (correct_count / n_to_check)
-    print(f"\n{'='*70}")
-    print(f"SPOT-CHECK RESULTS")
-    print(f"{'='*70}")
+    print(f"Spot-Check Results")
     print(f"  Samples checked:  {n_to_check}")
     print(f"  Correct:          {correct_count} ({100*correct_count/n_to_check:.1f}%)")
     print(f"  Incorrect:        {n_to_check - correct_count} ({100*error_rate:.1f}%)")
     print(f"")
-    print(f"  📊 ESTIMATED NOISE RATE: {100*error_rate:.1f}%")
+    print(f" Estimated noise rate: {100*error_rate:.1f}%")
     print(f"")
     
     if error_rate > 0.30:
-        print(f"  ⚠️  High noise detected! Consider:")
-        print(f"      - Increasing confidence threshold")
-        print(f"      - Reducing max_per_class")
-        print(f"      - Using manual verification for low-confidence samples")
+        print(f"  High noise detected")
     elif error_rate > 0.15:
-        print(f"  ⚡ Moderate noise. Prototypes should be robust enough.")
+        print(f"  Moderate noise")
     else:
-        print(f"  ✅ Low noise rate. Pseudo-labeling is working well!")
-    
-    print(f"{'='*70}")
-    
+        print(f"  Low noise rate")
+        
     return {
         'n_checked': n_to_check,
         'n_correct': correct_count,
@@ -2893,7 +2880,11 @@ def spot_check_pseudo_labels(
 # Efficientnet fine tuning helpers
 
 class DeepLakeEffNetDataset(Dataset):
-    """DeepLake dataset wrapper for EfficientNet-B4 training/eval."""
+    """DeepLake dataset wrapper for EfficientNet-B4 training/eval.
+    
+    Supports both torchvision transforms and Albumentations pipelines.
+    When custom_aug_pipeline is provided, it takes precedence over train_aug.
+    """
 
     def __init__(
         self,
@@ -2904,26 +2895,34 @@ class DeepLakeEffNetDataset(Dataset):
         preprocess_mode: str,
         bbox_padding_ratio: float,
         train_aug: bool,
+        custom_aug_pipeline: Optional[Any] = None,
     ):
         self.ds = ds
         self.indices = np.asarray(indices, dtype=int)
         self.y = np.asarray(y, dtype=int)
         self.preprocess_mode = str(preprocess_mode)
         self.bbox_padding_ratio = float(bbox_padding_ratio)
+        self.custom_aug_pipeline = custom_aug_pipeline
+        self.use_albumentations = custom_aug_pipeline is not None
 
         if self.preprocess_mode not in {"native", "bbox_crop"}:
             raise ValueError("preprocess_mode must be 'native' or 'bbox_crop'")
 
         base_tf = weights.transforms()
-        if train_aug:
-            self.tf = transforms.Compose(
-                [
-                    transforms.RandomHorizontalFlip(p=0.5),
-                    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
-                    base_tf,
-                ]
-            )
+        if not self.use_albumentations:
+            # Use torchvision transforms
+            if train_aug:
+                self.tf = transforms.Compose(
+                    [
+                        transforms.RandomHorizontalFlip(p=0.5),
+                        transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+                        base_tf,
+                    ]
+                )
+            else:
+                self.tf = base_tf
         else:
+            # For Albumentations, we still need base transform for final sizing
             self.tf = base_tf
 
     def __len__(self) -> int:
@@ -2936,15 +2935,32 @@ class DeepLakeEffNetDataset(Dataset):
         if self.preprocess_mode == "bbox_crop":
             box = sample["boxes"].numpy()
             img = apply_bbox_crop_optimized(img, box, padding_ratio=self.bbox_padding_ratio)
-        x = self.tf(Image.fromarray(img))
+        
+        if self.use_albumentations:
+            # Apply Albumentations pipeline (includes normalization and ToTensorV2)
+            augmented = self.custom_aug_pipeline(image=img)
+            x = augmented["image"]
+        else:
+            # Apply torchvision transforms
+            x = self.tf(Image.fromarray(img))
         return x, int(self.y[i])
 
 
-def build_efficientnet_b4(num_classes: int) -> Tuple[nn.Module, object]:
+def build_efficientnet_b4(num_classes: int, classifier_dropout: float = 0.3) -> Tuple[nn.Module, object]:
+    """Build EfficientNet-B4 with custom classifier head.
+    
+    Args:
+        num_classes: Number of output classes
+        classifier_dropout: Dropout probability before final layer (reduces overfitting)
+    """
     weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
     model = models.efficientnet_b4(weights=weights)
     in_features = model.classifier[-1].in_features
-    model.classifier[-1] = nn.Linear(in_features, int(num_classes))
+    # Replace classifier with dropout + linear for better regularization
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=classifier_dropout, inplace=True),
+        nn.Linear(in_features, int(num_classes)),
+    )
     return model, weights
 
 
@@ -3035,7 +3051,9 @@ def train_one_epoch(
     amp: bool,
     grad_clip_norm: float = 1.0,
     desc: str = "Training",
+    scheduler: Optional[Any] = None,
 ):
+    """Train for one epoch with optional LR scheduler (per-batch stepping)."""
     model.train()
     scaler = torch.amp.GradScaler("cuda") if (amp and device.type == "cuda") else None
     total_loss = 0.0
@@ -3064,6 +3082,10 @@ def train_one_epoch(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
+        
+        # Step the LR scheduler per batch (if provided)
+        if scheduler is not None:
+            scheduler.step()
 
         bs = x.shape[0]
         total_loss += float(loss.item()) * bs
@@ -3112,6 +3134,7 @@ class TrainConfig:
     preprocess_mode: str = "native"  # native | bbox_crop
     bbox_padding_ratio: float = 0.15
     train_aug: bool = True
+    custom_aug_pipeline: Optional[Any] = None  # Albumentations Compose pipeline (overrides train_aug)
 
     batch_size: int = 32
 
@@ -3123,7 +3146,7 @@ class TrainConfig:
     lr_head_finetune: float = 3e-4
 
     weight_decay: float = 1e-4
-    label_smoothing: float = 0.0
+    label_smoothing: float = 0.1  # Reduces overconfidence, helps generalization
 
     use_weighted_sampler: bool = True
     amp: bool = True
@@ -3132,10 +3155,15 @@ class TrainConfig:
     freeze_bn_in_head: bool = True
     freeze_bn_in_finetune: bool = True
 
+    # Regularization additions for few-shot learning
+    classifier_dropout: float = 0.3  # Dropout before final classifier
+    early_stopping_patience: int = 3  # Stop if no improvement for N epochs
+    use_lr_scheduler: bool = True  # Cosine annealing LR scheduler
+    warmup_epochs: int = 1  # LR warmup epochs
+
     seed: int = 42
     device: str = "auto"
     out_dir: str = "runs"
-    seed: int = 42
 
 def train_two_stage_effnetb4(
     cfg: TrainConfig,
@@ -3183,7 +3211,10 @@ def train_two_stage_effnetb4(
         test_idx.extend(te.tolist())
         test_y.extend([y] * len(te))
 
-    model, weights = build_efficientnet_b4(num_classes=len(class_ids))
+    model, weights = build_efficientnet_b4(
+        num_classes=len(class_ids),
+        classifier_dropout=cfg.classifier_dropout,
+    )
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
@@ -3196,6 +3227,7 @@ def train_two_stage_effnetb4(
         preprocess_mode=cfg.preprocess_mode,
         bbox_padding_ratio=cfg.bbox_padding_ratio,
         train_aug=cfg.train_aug,
+        custom_aug_pipeline=cfg.custom_aug_pipeline,
     )
     val_ds = DeepLakeEffNetDataset(
         ds_train,
@@ -3205,6 +3237,7 @@ def train_two_stage_effnetb4(
         preprocess_mode=cfg.preprocess_mode,
         bbox_padding_ratio=cfg.bbox_padding_ratio,
         train_aug=False,
+        custom_aug_pipeline=None,  # No augmentation for validation
     )
     test_ds = DeepLakeEffNetDataset(
         ds_train,
@@ -3214,6 +3247,7 @@ def train_two_stage_effnetb4(
         preprocess_mode=cfg.preprocess_mode,
         bbox_padding_ratio=cfg.bbox_padding_ratio,
         train_aug=False,
+        custom_aug_pipeline=None,  # No augmentation for test
     )
 
     sampler = _make_weighted_sampler(np.asarray(train_y, dtype=int)) if cfg.use_weighted_sampler else None
@@ -3227,11 +3261,45 @@ def train_two_stage_effnetb4(
     history: List[Dict[str, float]] = []
 
     def run_stage(stage: str, epochs: int, optimizer: torch.optim.Optimizer, freeze_bn: bool):
+        nonlocal history
         best_f1 = -1.0
         best_state = None
+        epochs_without_improvement = 0
+        
+        # Skip stage if epochs == 0
+        if epochs <= 0:
+            print(f"\n[Skipping {stage.upper()} stage (epochs=0)]")
+            return best_f1
+        
+        # Setup LR scheduler if enabled
+        scheduler = None
+        if cfg.use_lr_scheduler and epochs > 1:
+            from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, LinearLR, SequentialLR
+            # Warmup + Cosine annealing
+            warmup_epochs = min(cfg.warmup_epochs, epochs - 1)
+            if warmup_epochs > 0:
+                warmup_scheduler = LinearLR(
+                    optimizer, start_factor=0.1, end_factor=1.0, 
+                    total_iters=warmup_epochs * len(train_loader)
+                )
+                cosine_scheduler = CosineAnnealingWarmRestarts(
+                    optimizer, T_0=(epochs - warmup_epochs) * len(train_loader), T_mult=1
+                )
+                scheduler = SequentialLR(
+                    optimizer, 
+                    schedulers=[warmup_scheduler, cosine_scheduler],
+                    milestones=[warmup_epochs * len(train_loader)]
+                )
+            else:
+                scheduler = CosineAnnealingWarmRestarts(
+                    optimizer, T_0=epochs * len(train_loader), T_mult=1
+                )
         
         print(f"\n{'='*60}")
         print(f"STAGE: {stage.upper()} ({epochs} epochs)")
+        if scheduler:
+            print(f"  LR Scheduler: Warmup({cfg.warmup_epochs}ep) + CosineAnnealing")
+        print(f"  Early Stopping Patience: {cfg.early_stopping_patience}")
         print(f"{'='*60}")
 
         for ep in range(1, int(epochs) + 1):
@@ -3248,14 +3316,22 @@ def train_two_stage_effnetb4(
                 amp=cfg.amp,
                 grad_clip_norm=cfg.grad_clip_norm,
                 desc=f"{stage} Epoch {ep}/{epochs} [Train]",
+                scheduler=scheduler,  # Pass scheduler for per-batch updates
             )
             va = evaluate(model, val_loader, device=device, criterion=criterion, desc=f"{stage} Epoch {ep}/{epochs} [Val]")
             
             elapsed = time.time() - t0
+            
+            # Check for improvement
+            improved = va["f1"] > best_f1
+            improvement_marker = "↑" if improved else ""
+            
+            # Get current LR for logging
+            current_lr = optimizer.param_groups[0]["lr"]
             print(f"  Epoch {ep}/{epochs} | "
                   f"Train Loss: {tr['loss']:.4f}, Acc: {tr['acc']*100:.1f}% | "
-                  f"Val Loss: {va['loss']:.4f}, Acc: {va['acc']*100:.1f}%, F1: {va['f1']*100:.1f}% | "
-                  f"Time: {elapsed:.1f}s")
+                  f"Val Loss: {va['loss']:.4f}, Acc: {va['acc']*100:.1f}%, F1: {va['f1']*100:.1f}% {improvement_marker} | "
+                  f"LR: {current_lr:.2e} | Time: {elapsed:.1f}s")
 
             history.append(
                 {
@@ -3271,16 +3347,26 @@ def train_two_stage_effnetb4(
                     "val_precision": va["precision"],
                     "val_recall": va["recall"],
                     "val_f1": va["f1"],
+                    "lr": current_lr,
                     "seconds": elapsed,
                 }
             )
 
-            if va["f1"] > best_f1:
+            if improved:
                 best_f1 = va["f1"]
                 best_state = {"model_state": {k: v.detach().cpu() for k, v in model.state_dict().items()}, "class_ids": class_ids}
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                
+            # Early stopping check
+            if cfg.early_stopping_patience > 0 and epochs_without_improvement >= cfg.early_stopping_patience:
+                print(f"  ⚠️ Early stopping triggered after {cfg.early_stopping_patience} epochs without improvement")
+                break
 
         if best_state is not None:
             model.load_state_dict(best_state["model_state"], strict=True)
+            print(f"  ✓ Restored best model (Val F1: {best_f1*100:.2f}%)")
         return best_f1
 
     # Stage 1: head-only

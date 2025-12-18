@@ -854,10 +854,10 @@ def train_one_epoch(
         torch.cuda.empty_cache()
         allocated = torch.cuda.memory_allocated() / 1e9
         reserved = torch.cuda.memory_reserved() / 1e9
-        print(f"    💾 GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved", flush=True)
+        print(f"    GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved", flush=True)
 
     # NOTE: First batch may be slow due to DeepLake cloud download + cache building
-    print("    ⏳ Loading first batch (may take 1-2 min on first run)...", flush=True)
+    print("    Loading first batch...", flush=True)
     pbar = tqdm(loader, desc="Train", leave=False)
     first_batch = True
     for x, y in pbar:
@@ -883,7 +883,7 @@ def train_one_epoch(
         # Debug: Print memory after first batch
         if first_batch and device.type == "cuda":
             peak_mem = torch.cuda.max_memory_allocated() / 1e9
-            print(f"    ✅ First batch complete! Peak GPU memory: {peak_mem:.2f}GB", flush=True)
+            print(f"    First batch complete! Peak GPU memory: {peak_mem:.2f}GB", flush=True)
             first_batch = False
 
         bs = x.shape[0]
@@ -1703,7 +1703,7 @@ def train_two_stage(
         "val_best_f1": float(history_df["val_f1"].max()),
     }, indent=2))
     
-    print(f"\n✅ Results saved to: {run_dir}")
+    print(f"\nResults saved to: {run_dir}")
     
     return model, history_df, summary, run_dir
 
