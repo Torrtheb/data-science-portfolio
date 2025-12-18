@@ -2387,6 +2387,10 @@ class FewShotExperiment:
         initial_threshold: float = 0.8,
         min_threshold: float = 0.2,
         threshold_decay: float = 0.1,
+        margin_threshold: Optional[float] = None,
+        min_margin_threshold: float = 0.0,
+        margin_decay: float = 0.0,
+        mutual_nn_k: Optional[int] = None,
         max_iterations: int = 50,
         max_per_class: int = 5,
         use_true_labels: bool = True,
@@ -2402,6 +2406,10 @@ class FewShotExperiment:
             initial_threshold: Starting confidence threshold.
             min_threshold: Minimum threshold before stopping.
             threshold_decay: Amount to reduce threshold when stuck.
+            margin_threshold: Optional minimum probability margin p(top1)-p(top2) for acceptance.
+            min_margin_threshold: Minimum margin threshold if margin_decay is used.
+            margin_decay: Amount to reduce margin threshold when stuck (0 disables margin decay).
+            mutual_nn_k: Optional K for mutual nearest-neighbor filter.
             max_iterations: Maximum iterations to run.
             max_per_class: Maximum samples to add per class per iteration.
             use_true_labels: If True, only accept correct predictions (simulation).
@@ -2417,12 +2425,17 @@ class FewShotExperiment:
         print(f"Target accuracy: {target_accuracy*100:.0f}%")
         print(f"Initial threshold: {initial_threshold}")
         print(f"Min threshold: {min_threshold}")
+        if margin_threshold is not None:
+            print(f"Margin threshold: {float(margin_threshold):.3f} (min {float(min_margin_threshold):.3f}, decay {float(margin_decay):.3f})")
+        if mutual_nn_k is not None:
+            print(f"Mutual-NN K: {int(mutual_nn_k)}")
         print(f"Max iterations: {max_iterations}")
         print(f"Max per class: {max_per_class}")
         print(f"Mode: {'Simulation (uses true labels)' if use_true_labels else 'Real (no true labels)'}")
         print(f"{'='*70}\n")
 
         current_threshold = float(initial_threshold)
+        current_margin = float(margin_threshold) if margin_threshold is not None else None
         iterations_without_candidates = 0
 
         # Get initial metrics
@@ -2454,7 +2467,9 @@ class FewShotExperiment:
             stats = self.run_iteration(
                 confidence_threshold=current_threshold,
                 max_per_class=max_per_class,
-                use_true_labels=use_true_labels
+                use_true_labels=use_true_labels,
+                margin_threshold=current_margin,
+                mutual_nn_k=mutual_nn_k,
             )
 
             current_accuracy = float(stats.get('accuracy_after', stats.get('val_accuracy', 0.0)))
@@ -2463,15 +2478,20 @@ class FewShotExperiment:
             current_f1 = float(stats.get('f1_after', stats.get('val_f1', 0.0)))
 
             if verbose:
-                print(
+                msg = (
                     f"Iter {stats['iteration']:3d} | "
                     f"Thresh: {current_threshold:.2f} | "
+                )
+                if current_margin is not None:
+                    msg += f"Margin: {current_margin:.3f} | "
+                msg += (
                     f"Added: {stats['n_added']:3d} | "
                     f"Acc: {current_accuracy*100:.2f}% | "
                     f"F1: {current_f1*100:.2f}% | "
                     f"Support: {stats['support_count']} | "
                     f"Pool: {stats['pool_count']}"
                 )
+                print(msg)
 
             no_progress = (stats['n_candidates'] == 0) or (use_true_labels and stats['n_added'] == 0)
 
@@ -2480,6 +2500,9 @@ class FewShotExperiment:
                 if current_threshold > min_threshold:
                     current_threshold = max(min_threshold, current_threshold - threshold_decay)
                     print(f"   → Lowering threshold to {current_threshold:.2f}")
+                elif current_margin is not None and float(margin_decay) > 0 and current_margin > float(min_margin_threshold):
+                    current_margin = max(float(min_margin_threshold), current_margin - float(margin_decay))
+                    print(f"   → Lowering margin to {current_margin:.3f}")
                 else:
                     print(f"   → At minimum threshold, no more candidates")
                     if iterations_without_candidates >= 3:
