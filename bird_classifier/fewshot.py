@@ -611,19 +611,23 @@ class MultiBackboneFeatureExtractor:
         self.preprocess = weights.transforms()
         self.embedding_dim = 768
     
-    def _apply_preprocessing(self, img: np.ndarray, ds=None, idx: int = None) -> np.ndarray:
+    def _apply_preprocessing(self, img: np.ndarray, ds=None, idx: int = None, box: np.ndarray = None) -> np.ndarray:
         """Apply preprocessing based on the configured mode.
 
         Args:
             img: Input image as numpy array with shape (H, W, C).
-            ds: Optional DeepLake dataset for bbox crop mode.
-            idx: Optional sample index for bbox crop mode.
+            ds: Optional DeepLake dataset for bbox crop mode (legacy, prefer box param).
+            idx: Optional sample index for bbox crop mode (legacy, prefer box param).
+            box: Optional pre-loaded bounding box array (preferred for batch processing).
 
         Returns:
             np.ndarray: Preprocessed image ready for backbone transforms.
         """
-        if self.preprocess_mode == 'bbox_crop' and ds is not None and idx is not None:
-            img = apply_bbox_crop(img, ds, idx, padding_ratio=self.bbox_padding_ratio)
+        if self.preprocess_mode == 'bbox_crop':
+            if box is not None:
+                img = apply_bbox_crop_optimized(img, box, padding_ratio=self.bbox_padding_ratio)
+            elif ds is not None and idx is not None:
+                img = apply_bbox_crop(img, ds, idx, padding_ratio=self.bbox_padding_ratio)
         if self.pad_to_square:
             img = self._pad_to_square(img)
         return img
@@ -696,10 +700,20 @@ class MultiBackboneFeatureExtractor:
             batch_indices = [int(j) for j in indices[i:i+batch_size]]
             images_np = ds["images"][batch_indices].numpy(aslist=True)
             
+            # Batch-load boxes if using bbox_crop mode (avoids slow per-sample indexing)
+            boxes = None
+            if self.preprocess_mode == 'bbox_crop':
+                try:
+                    boxes = ds["boxes"][batch_indices].numpy(aslist=True)
+                except Exception:
+                    boxes = [None] * len(batch_indices)
+            else:
+                boxes = [None] * len(batch_indices)
+            
             # Apply preprocessing (bbox crop + optional pad-to-square)
             images = [
-                self._apply_preprocessing(img, ds, idx)
-                for img, idx in zip(images_np, batch_indices)
+                self._apply_preprocessing(img, box=box)
+                for img, box in zip(images_np, boxes)
             ]
             
             embeddings = self.extract_batch(images)
@@ -1301,20 +1315,24 @@ class FeatureExtractor:
             left = right = 0
         return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_REFLECT_101)
 
-    def _apply_preprocessing(self, img: np.ndarray, ds=None, idx: int = None) -> np.ndarray:
+    def _apply_preprocessing(self, img: np.ndarray, ds=None, idx: int = None, box: np.ndarray = None) -> np.ndarray:
         """Apply preprocessing pipeline based on configured mode.
 
         Args:
             img: Input image as numpy array with shape (H, W, C).
-            ds: Optional DeepLake dataset for bbox crop mode.
-            idx: Optional sample index for bbox crop mode.
+            ds: Optional DeepLake dataset for bbox crop mode (legacy, prefer box param).
+            idx: Optional sample index for bbox crop mode (legacy, prefer box param).
+            box: Optional pre-loaded bounding box array (preferred for batch processing).
 
         Returns:
             np.ndarray: Preprocessed image ready for backbone transforms.
         """
         img = self._ensure_uint8(img)
-        if self.preprocess_mode == "bbox_crop" and ds is not None and idx is not None:
-            img = apply_bbox_crop(img, ds, idx, padding_ratio=self.bbox_padding_ratio)
+        if self.preprocess_mode == "bbox_crop":
+            if box is not None:
+                img = apply_bbox_crop_optimized(img, box, padding_ratio=self.bbox_padding_ratio)
+            elif ds is not None and idx is not None:
+                img = apply_bbox_crop(img, ds, idx, padding_ratio=self.bbox_padding_ratio)
         if self.pad_to_square:
             img = self._pad_to_square(img)
         return img
@@ -1385,7 +1403,18 @@ class FeatureExtractor:
         for i in iterator:
             batch_indices = [int(j) for j in indices[i : i + batch_size]]
             images_np = ds["images"][batch_indices].numpy(aslist=True)
-            images = [self._apply_preprocessing(img, ds, idx) for img, idx in zip(images_np, batch_indices)]
+            
+            # Batch-load boxes if using bbox_crop mode (avoids slow per-sample indexing)
+            boxes = None
+            if self.preprocess_mode == "bbox_crop":
+                try:
+                    boxes = ds["boxes"][batch_indices].numpy(aslist=True)
+                except Exception:
+                    boxes = [None] * len(batch_indices)
+            else:
+                boxes = [None] * len(batch_indices)
+            
+            images = [self._apply_preprocessing(img, box=box) for img, box in zip(images_np, boxes)]
             embeddings = self.extract_batch(images)
             all_embeddings.append(embeddings)
         return np.vstack(all_embeddings)
