@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from PIL import Image
 from tqdm.auto import tqdm
+import pickle
 
 import torch
 import torch.nn as nn
@@ -2262,6 +2263,204 @@ class FewShotExperiment:
 
         self.history.append(iteration_stats)
         return iteration_stats
+
+    def run_greedy_pseudo_labeling(
+        self,
+        *,
+        max_iterations: int = 30,
+        min_improvement: float = 0.0,
+        mode: str = "batch",
+        max_total_candidates: int = 500,
+        confidence_threshold: float = 0.05,
+        max_per_class: int = 5,
+        use_true_labels: bool = False,
+        margin_threshold: Optional[float] = None,
+        sim_threshold: Optional[float] = None,
+        sim_margin_threshold: Optional[float] = None,
+        mutual_nn_k: Optional[int] = None,
+        verbose: bool = True,
+    ) -> Dict[str, Any]:
+        """Strict pseudo-labeling: only keep additions if validation accuracy increases.
+
+        This is a conservative alternative to `run_auto_pseudo_labeling()` and
+        `run_robust_pseudo_labeling()`:
+        - In `mode='batch'`, each iteration proposes a batch via `run_iteration()`.
+          If val accuracy does not improve by `min_improvement`, the entire batch
+          is rolled back and the loop stops.
+        - In `mode='sample'`, candidates are tried one-by-one and only kept if
+          each individual addition improves validation.
+
+        Args:
+            max_iterations: Maximum greedy iterations (batch mode) or passes over candidate list (sample mode).
+            min_improvement: Required minimum increase in val accuracy to accept an addition.
+            mode: 'batch' or 'sample'.
+            max_total_candidates: In sample mode, maximum total candidates to consider.
+            confidence_threshold: Softmax probability gate (secondary in many-class problems).
+            max_per_class: Max additions per class per iteration (batch) or cap per class in candidate generation (sample).
+            use_true_labels: If True, simulation mode (reject incorrect pseudo labels using ground truth).
+            margin_threshold: Optional probability margin p(top1)-p(top2).
+            sim_threshold: Optional cosine similarity threshold to predicted prototype.
+            sim_margin_threshold: Optional cosine similarity margin (sim_top1 - sim_top2).
+            mutual_nn_k: Optional mutual nearest-neighbor filter K.
+            verbose: Print per-step decisions.
+
+        Returns:
+            Dict with accepted/rejected counts and final accuracy.
+        """
+        mode = str(mode).lower().strip()
+        if mode not in {"batch", "sample"}:
+            raise ValueError("mode must be 'batch' or 'sample'")
+
+        accepted: List[Dict[str, Any]] = []
+        rejected: List[Dict[str, Any]] = []
+
+        def acc() -> float:
+            return float(self.evaluate_on_val()["accuracy"])
+
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"GREEDY PSEUDO-LABELING (mode={mode})")
+            print(f"{'='*70}")
+            print(f"Start | Val acc: {acc()*100:.2f}% | Support: {self.get_support_count()} | Pool: {self.get_pool_count()}")
+
+        if mode == "batch":
+            for it in range(1, int(max_iterations) + 1):
+                if self.get_pool_count() == 0:
+                    break
+
+                before_acc = acc()
+                state = self.save_state()
+
+                stats = self.run_iteration(
+                    confidence_threshold=confidence_threshold,
+                    max_per_class=max_per_class,
+                    use_true_labels=use_true_labels,
+                    margin_threshold=margin_threshold,
+                    sim_threshold=sim_threshold,
+                    sim_margin_threshold=sim_margin_threshold,
+                    mutual_nn_k=mutual_nn_k,
+                )
+
+                # No additions => stop
+                if int(stats.get("n_added", 0)) == 0:
+                    if verbose:
+                        print(f"Iter {it:02d}: no samples added; stopping.")
+                    break
+
+                after_acc = acc()
+                if after_acc >= before_acc + float(min_improvement):
+                    accepted.append(
+                        {
+                            "iteration": it,
+                            "n_added": int(stats.get("n_added", 0)),
+                            "val_before": float(before_acc),
+                            "val_after": float(after_acc),
+                        }
+                    )
+                    if verbose:
+                        print(
+                            f"Iter {it:02d}: ACCEPT (+{(after_acc-before_acc)*100:.2f}%) "
+                            f"added={stats.get('n_added', 0)} | Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
+                        )
+                else:
+                    self.restore_state(state)
+                    rejected.append(
+                        {
+                            "iteration": it,
+                            "n_added": int(stats.get("n_added", 0)),
+                            "val_before": float(before_acc),
+                            "val_after": float(after_acc),
+                        }
+                    )
+                    if verbose:
+                        print(
+                            f"Iter {it:02d}: REJECT (val decreased) "
+                            f"added={stats.get('n_added', 0)} | Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
+                        )
+                        print("Stopping (strict mode).")
+                    break
+
+        else:
+            # Generate candidates once (sorted by similarity/confidence inside method)
+            high_conf = self.get_high_confidence_predictions(
+                threshold=confidence_threshold,
+                max_per_class=max_per_class,
+                margin_threshold=margin_threshold,
+                sim_threshold=sim_threshold,
+                sim_margin_threshold=sim_margin_threshold,
+                mutual_nn_k=mutual_nn_k,
+            )
+
+            flat: List[Dict[str, Any]] = []
+            for pred_class, items in high_conf.items():
+                for cand in items:
+                    flat.append({"pred_class": int(pred_class), **cand})
+
+            # Sort most reliable first
+            flat.sort(
+                key=lambda c: (
+                    float(c.get("similarity", -1e9)),
+                    float(c.get("sim_margin", -1e9)),
+                    float(c.get("confidence", -1e9)),
+                ),
+                reverse=True,
+            )
+            flat = flat[: int(max_total_candidates)]
+
+            for j, cand in enumerate(flat, start=1):
+                before_acc = acc()
+                state = self.save_state()
+
+                # Optionally reject by true label in simulation
+                if use_true_labels and int(cand.get("true_class", -1)) != int(cand["pred_class"]):
+                    rejected.append({"idx": int(cand["idx"]), "pred_class": int(cand["pred_class"]), "reason": "wrong_in_sim"})
+                    continue
+
+                self.add_to_support([int(cand["idx"])], int(cand["pred_class"]))
+                after_acc = acc()
+                if after_acc >= before_acc + float(min_improvement):
+                    accepted.append(
+                        {
+                            "idx": int(cand["idx"]),
+                            "pred_class": int(cand["pred_class"]),
+                            "val_before": float(before_acc),
+                            "val_after": float(after_acc),
+                        }
+                    )
+                    if verbose and (j <= 25 or j % 50 == 0):
+                        print(
+                            f"Sample {j:04d}: ACCEPT (+{(after_acc-before_acc)*100:.2f}%) "
+                            f"Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
+                        )
+                else:
+                    self.restore_state(state)
+                    rejected.append(
+                        {
+                            "idx": int(cand["idx"]),
+                            "pred_class": int(cand["pred_class"]),
+                            "val_before": float(before_acc),
+                            "val_after": float(after_acc),
+                        }
+                    )
+                    if verbose and (j <= 25 or j % 50 == 0):
+                        print(
+                            f"Sample {j:04d}: REJECT (val decreased) "
+                            f"Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
+                        )
+
+        out = {
+            "mode": mode,
+            "n_accepted": int(len(accepted)),
+            "n_rejected": int(len(rejected)),
+            "final_val_accuracy": float(acc()),
+            "support_count": int(self.get_support_count()),
+            "pool_remaining": int(self.get_pool_count()),
+            "accepted": accepted,
+            "rejected": rejected,
+        }
+        if verbose:
+            print(f"\nDone | Val acc: {out['final_val_accuracy']*100:.2f}% | Accepted: {out['n_accepted']} | Rejected: {out['n_rejected']}")
+        return out
     
     def get_worst_classes(self, n: int = 5) -> List[Tuple[int, float]]:
         """Get the classes with lowest validation accuracy.
@@ -3235,7 +3434,8 @@ def run_pseudo_labeling_experiments(
     print(f"   Improvement: {best_config['improvement']*100:+.2f}%")
     
     if return_best_state:
-        df.attrs["best_state"] = best_state
+        # Store as bytes to avoid pandas trying to compare numpy arrays in attrs during display/concat.
+        df.attrs["best_state_pickle"] = pickle.dumps(best_state, protocol=pickle.HIGHEST_PROTOCOL)
     return df
 
 
@@ -3333,9 +3533,15 @@ def run_pseudo_labeling_experiments_from_experiment(
 
 def apply_best_state_from_results(exp: FewShotExperiment, results_df: pd.DataFrame) -> None:
     """Restore the best saved state from `run_pseudo_labeling_experiments(..., return_best_state=True)`."""
-    state = getattr(results_df, "attrs", {}).get("best_state")
+    attrs = getattr(results_df, "attrs", {}) or {}
+    if "best_state_pickle" in attrs and attrs["best_state_pickle"] is not None:
+        state = pickle.loads(attrs["best_state_pickle"])
+        exp.restore_state(state)
+        return
+    # Backward compatibility (older runs may have stored arrays directly, which can break display)
+    state = attrs.get("best_state")
     if state is None:
-        raise ValueError("No best_state found in results_df.attrs; run with return_best_state=True.")
+        raise ValueError("No best state found in results_df.attrs; run with return_best_state=True.")
     exp.restore_state(state)
 
 
