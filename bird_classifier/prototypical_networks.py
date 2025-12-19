@@ -412,7 +412,8 @@ def train_projection_head_episodic(
     val_every: int = 100,
     min_samples_per_class: Optional[int] = None,
     seed: int = 42,
-    verbose: bool = True
+    verbose: bool = True,
+    use_cosine: bool = False
 ) -> Dict:
     """
     Train Prototypical Network with episodic training.
@@ -433,6 +434,7 @@ def train_projection_head_episodic(
         val_every: Validate every N episodes
         seed: Random seed
         verbose: Print progress
+        use_cosine: If True, use cosine similarity; else Euclidean distance
     
     Returns:
         Dict with training history
@@ -491,12 +493,11 @@ def train_projection_head_episodic(
         query_proj = model(query_emb)
         
         # Compute prototypes (mean of support embeddings per class)
-        # DO NOT normalize - use raw Euclidean distance like original ProtoNet
         prototypes = compute_prototypes(support_proj, support_labels_t, n_way)
         
-        # Compute loss using Euclidean distance (original ProtoNet)
+        # Compute loss (Euclidean or cosine based on use_cosine parameter)
         loss, acc = prototypical_loss(query_proj, query_labels_t, prototypes, 
-                                       temperature=1.0, use_cosine=False)
+                                       temperature=1.0, use_cosine=use_cosine)
         
         # Backward pass
         loss.backward()
@@ -558,7 +559,8 @@ def evaluate_protonet(
     device: torch.device,
     n_way: int = 555,  # Use all classes for final evaluation
     k_shot: int = 5,
-    use_all_support: bool = True
+    use_all_support: bool = True,
+    use_cosine: bool = False
 ) -> float:
     """
     Evaluate Prototypical Network on validation set.
@@ -576,6 +578,7 @@ def evaluate_protonet(
         n_way: Number of classes (555 for full evaluation)
         k_shot: Number of support samples per class
         use_all_support: If True, use all available support samples
+        use_cosine: If True, use cosine similarity; else Euclidean distance
     
     Returns:
         Accuracy on validation set
@@ -608,7 +611,6 @@ def evaluate_protonet(
     with torch.no_grad():
         support_proj = model(support_embs)
         prototypes = compute_prototypes(support_proj, support_labels, len(unique_classes))
-        # DO NOT normalize - use Euclidean distance consistently with training
         
         # Process validation in batches
         val_embs = torch.from_numpy(val_embeddings).float()
@@ -618,9 +620,17 @@ def evaluate_protonet(
         for i in range(0, len(val_embs), batch_size):
             batch = val_embs[i:i+batch_size].to(device)
             batch_proj = model(batch)
-            # Use Euclidean distance (same as training)
-            dists = torch.cdist(batch_proj, prototypes, p=2)
-            preds = dists.argmin(dim=1).cpu().numpy()  # argmin for distance
+            
+            if use_cosine:
+                # Cosine similarity (higher = more similar)
+                batch_norm = F.normalize(batch_proj, p=2, dim=1)
+                proto_norm = F.normalize(prototypes, p=2, dim=1)
+                sims = batch_norm @ proto_norm.T
+                preds = sims.argmax(dim=1).cpu().numpy()  # argmax for similarity
+            else:
+                # Euclidean distance (lower = more similar)
+                dists = torch.cdist(batch_proj, prototypes, p=2)
+                preds = dists.argmin(dim=1).cpu().numpy()  # argmin for distance
             all_preds.extend(preds)
     
     # Convert predictions back to original class IDs
@@ -741,6 +751,7 @@ def run_prototypical_network_experiment(
     lr: float = 5e-4,            # Lower learning rate for stability
     embedding_dim: int = 512,    # Larger output for 555 classes
     min_samples_per_class: Optional[int] = None,  # None = k_shot + n_query (minimum needed)
+    use_cosine: bool = False,    # If True, use cosine similarity instead of Euclidean
     seed: int = 42
 ) -> Dict:
     """
@@ -766,6 +777,8 @@ def run_prototypical_network_experiment(
         n_query: Query samples per class per episode
         lr: Learning rate
         embedding_dim: Output embedding dimension
+        min_samples_per_class: Min samples needed per class
+        use_cosine: If True, use cosine similarity instead of Euclidean distance
         seed: Random seed
     
     Returns:
@@ -839,7 +852,8 @@ def run_prototypical_network_experiment(
     print(f"  Episode config: {n_way}-way {k_shot}-shot {n_query}-query")
     print(f"  Learning rate: {lr}")
     print(f"  Embedding dimension: {embedding_dim}")
-    print(f"  Distance metric: Euclidean (original ProtoNet)")
+    metric_str = "Cosine similarity" if use_cosine else "Euclidean distance"
+    print(f"  Distance metric: {metric_str}")
     print(f"  Projection mode: residual (preserves pretrained structure)")
     
     model = PrototypicalNetwork(
@@ -866,6 +880,7 @@ def run_prototypical_network_experiment(
         eval_use_all_support=True,                   # mapping already contains the chosen support
         val_every=200,
         min_samples_per_class=min_samples_per_class,
+        use_cosine=use_cosine,
         seed=seed
     )
     
@@ -876,7 +891,8 @@ def run_prototypical_network_experiment(
     final_acc = evaluate_protonet(
         model, train_embeddings, support_class_to_pos,
         val_embeddings, val_labels, device,
-        use_all_support=True
+        use_all_support=True,
+        use_cosine=use_cosine
     )
     
     print(f"\n{'='*70}")
@@ -913,6 +929,7 @@ def quick_validation_test(
     device: torch.device,
     batch_size: int = 64,
     n_episodes: int = 1000,  # More episodes for reliable results
+    use_cosine: bool = False,  # Use Euclidean by default (original ProtoNet)
     seed: int = 42
 ) -> Dict:
     """
@@ -921,19 +938,24 @@ def quick_validation_test(
     This is a faster version with fewer episodes to quickly validate
     the hypothesis before committing to full training.
     
-    Key improvements over initial version:
+    Key settings:
     - Larger embedding_dim (512) to handle 555 fine-grained classes
     - More episodes (1000) for better convergence
-    - Uses cosine similarity instead of Euclidean distance
+    - Euclidean distance by default (original ProtoNet paper)
+    
+    Args:
+        use_cosine: If True, use cosine similarity instead of Euclidean distance
     """
+    metric_str = "Cosine similarity" if use_cosine else "Euclidean distance"
+    
     print("=" * 70)
-    print("QUICK VALIDATION: Testing learned projection head (improved)")
+    print("QUICK VALIDATION: Testing learned projection head")
     print("=" * 70)
     print()
     print("Key settings:")
-    print("  - Embedding dimension: 512 (larger for fine-grained classes)")
-    print("  - Distance metric: Cosine similarity")
-    print("  - Training episodes: 1000")
+    print(f"  - Embedding dimension: 512 (larger for fine-grained classes)")
+    print(f"  - Distance metric: {metric_str}")
+    print(f"  - Training episodes: {n_episodes}")
     print()
     
     return run_prototypical_network_experiment(
@@ -950,6 +972,7 @@ def quick_validation_test(
         n_query=5,
         lr=5e-4,  # Slightly lower learning rate
         embedding_dim=512,  # Much larger output dimension
+        use_cosine=use_cosine,
         seed=seed
     )
 
