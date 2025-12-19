@@ -1573,6 +1573,75 @@ class FewShotExperiment:
         
         # Compute initial per-class accuracy on VALIDATION split (not final test)
         self._update_per_class_stats()
+    
+    def set_projection_head(
+        self,
+        projection_model: Optional[nn.Module] = None,
+        device: Optional[torch.device] = None,
+        recompute: bool = True,
+    ) -> None:
+        """Set a learned projection head to transform embeddings before prototype computation.
+        
+        This allows using a trained projection (e.g., from PrototypicalNetwork or 
+        LearnedProjectionHead) to improve embedding quality for pseudo-labeling.
+        
+        Args:
+            projection_model: A PyTorch module that transforms embeddings. 
+                If None, removes any existing projection (uses raw embeddings).
+            device: Device to run projection on. If None, uses CUDA if available.
+            recompute: If True, recompute prototypes with the new projection.
+        
+        Example:
+            >>> from prototypical_networks import PrototypicalNetwork
+            >>> model = PrototypicalNetwork(input_dim=1792, mode="residual")
+            >>> # ... train model ...
+            >>> experiment.set_projection_head(model, device=DEVICE)
+            >>> # Now all prototype computations and predictions use projected embeddings
+        """
+        self._projection_model = projection_model
+        self._projection_device = device if device is not None else (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+        
+        # Clear projected embedding cache
+        self._projected_train_embeddings = None
+        self._projected_val_embeddings = None
+        
+        if projection_model is not None:
+            projection_model.to(self._projection_device)
+            projection_model.eval()
+            print(f"✅ Projection head set: {projection_model.__class__.__name__}")
+            print(f"   Device: {self._projection_device}")
+        else:
+            print("🔄 Projection head removed, using raw embeddings")
+        
+        if recompute:
+            self.prototypes, self.class_ids = self._compute_prototypes_from_cache()
+            self.class_id_to_idx = {cid: i for i, cid in enumerate(self.class_ids)}
+    
+    def _apply_projection(self, embeddings: np.ndarray) -> np.ndarray:
+        """Apply the projection head to embeddings if one is set.
+        
+        Args:
+            embeddings: Raw embeddings of shape (N, D)
+            
+        Returns:
+            Projected embeddings of shape (N, D') or original embeddings if no projection
+        """
+        if not hasattr(self, '_projection_model') or self._projection_model is None:
+            return embeddings
+        
+        # Convert to tensor, project, convert back
+        with torch.no_grad():
+            emb_tensor = torch.from_numpy(embeddings).float().to(self._projection_device)
+            projected = self._projection_model(emb_tensor)
+            return projected.cpu().numpy()
+    
+    def _get_projected_train_embeddings(self) -> np.ndarray:
+        """Get train embeddings with projection applied (cached)."""
+        if not hasattr(self, '_projected_train_embeddings') or self._projected_train_embeddings is None:
+            self._projected_train_embeddings = self._apply_projection(self._train_embeddings)
+        return self._projected_train_embeddings
         
         # Print split summary
         print(f"\n{'='*60}")
@@ -1770,6 +1839,8 @@ class FewShotExperiment:
 
         Computes the mean embedding for each class's support set samples
         to create class prototypes for nearest-neighbor classification.
+        
+        If a projection head is set, applies it to embeddings before computing prototypes.
 
         Returns:
             Tuple[np.ndarray, np.ndarray]: Tuple containing:
@@ -1779,14 +1850,19 @@ class FewShotExperiment:
         class_ids = sorted(self.support_indices.keys())
         prototypes = []
         
+        # Use projected embeddings if projection is set
+        train_emb = self._get_projected_train_embeddings()
+        
         for class_id in class_ids:
             indices = self.support_indices[class_id]
             
             if len(indices) == 0:
-                prototypes.append(np.zeros(self.extractor.embedding_dim))
+                # Get output dimension from projection or extractor
+                out_dim = train_emb.shape[1] if len(train_emb) > 0 else self.extractor.embedding_dim
+                prototypes.append(np.zeros(out_dim))
                 continue
             
-            embeddings = self._train_embeddings[indices]
+            embeddings = train_emb[indices]
             prototype = self._compute_prototype_from_embeddings(embeddings)
             prototypes.append(prototype)
         
@@ -1876,15 +1952,19 @@ class FewShotExperiment:
 
         Use this for monitoring performance during iterative pseudo-labeling.
         Does not touch the final held-out test set.
+        
+        If a projection head is set, applies it to embeddings before evaluation.
 
         Returns:
             Dict: Dictionary containing accuracy, precision, recall, F1,
                 predictions, true_labels, confidences, and similarities.
         """
+        # Use projected embeddings if projection is set
+        train_emb = self._get_projected_train_embeddings()
         return self._evaluate_on_indices(
             self.val_flat, 
             self._val_labels, 
-            self._train_embeddings,
+            train_emb,
             desc="Evaluating on validation"
         )
     
@@ -1893,6 +1973,8 @@ class FewShotExperiment:
 
         Use this for evaluating the pseudo-labeling strategy on a held-out
         portion of the training data (separate from final test set).
+        
+        If a projection head is set, applies it to embeddings before evaluation.
 
         Returns:
             Dict: Dictionary containing accuracy, precision, recall, F1,
@@ -1904,10 +1986,12 @@ class FewShotExperiment:
             test_labels_list.extend([class_id] * len(indices))
         test_labels = np.array(test_labels_list, dtype=np.int64)
         
+        # Use projected embeddings if projection is set
+        train_emb = self._get_projected_train_embeddings()
         return self._evaluate_on_indices(
             self.test_flat,
             test_labels,
-            self._train_embeddings,
+            train_emb,
             desc="Evaluating on test"
         )
     
@@ -2007,8 +2091,9 @@ class FewShotExperiment:
         if len(pool_flat) == 0:
             return {}
         
-        # Get embeddings and classify
-        pool_embeddings = self._train_embeddings[pool_flat]
+        # Get embeddings and classify (use projected embeddings if projection is set)
+        train_emb = self._get_projected_train_embeddings()
+        pool_embeddings = train_emb[pool_flat]
         
         prototypes_norm = self.prototypes / (np.linalg.norm(self.prototypes, axis=1, keepdims=True) + 1e-8)
         pool_emb_norm = pool_embeddings / (np.linalg.norm(pool_embeddings, axis=1, keepdims=True) + 1e-8)
@@ -2750,13 +2835,14 @@ class FewShotExperiment:
             Dict with recommended thresholds: sim_threshold, sim_margin_threshold,
             and estimated precision/recall at those thresholds.
         """
-        # Get all pool predictions with full info
+        # Get all pool predictions with full info (use projected embeddings if projection is set)
         pool_flat = flatten_indices(self.pool_indices)
         if len(pool_flat) == 0:
             print("Pool is empty, cannot calibrate.")
             return {}
         
-        pool_embeddings = self._train_embeddings[pool_flat]
+        train_emb = self._get_projected_train_embeddings()
+        pool_embeddings = train_emb[pool_flat]
         prototypes_norm = self.prototypes / (np.linalg.norm(self.prototypes, axis=1, keepdims=True) + 1e-8)
         pool_emb_norm = pool_embeddings / (np.linalg.norm(pool_embeddings, axis=1, keepdims=True) + 1e-8)
         similarities = pool_emb_norm @ prototypes_norm.T
