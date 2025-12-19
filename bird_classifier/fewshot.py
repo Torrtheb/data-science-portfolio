@@ -2814,6 +2814,529 @@ class FewShotExperiment:
             'target_reached': current_accuracy >= target_accuracy
         }
 
+    def save_state(self) -> Dict:
+        """Save current experiment state for potential rollback.
+        
+        Returns:
+            Dict containing copies of support_indices, pool_indices,
+            prototypes, history, and current metrics.
+        """
+        return {
+            'support_indices': {k: v.copy() for k, v in self.support_indices.items()},
+            'pool_indices': {k: v.copy() for k, v in self.pool_indices.items()},
+            'prototypes': self.prototypes.copy(),
+            'class_ids': self.class_ids.copy(),
+            'history': list(self.history),
+            'iteration': self.iteration,
+            'prototype_method': self.prototype_method,
+            'prototype_trim_k': self.prototype_trim_k,
+            'prototype_weight_power': self.prototype_weight_power,
+        }
+    
+    def restore_state(self, state: Dict) -> None:
+        """Restore experiment state from a saved snapshot.
+        
+        Args:
+            state: State dictionary from save_state().
+        """
+        self.support_indices = {k: v.copy() for k, v in state['support_indices'].items()}
+        self.pool_indices = {k: v.copy() for k, v in state['pool_indices'].items()}
+        self.prototypes = state['prototypes'].copy()
+        self.class_ids = state['class_ids'].copy()
+        self.class_id_to_idx = {cid: i for i, cid in enumerate(self.class_ids)}
+        self.history = list(state['history'])
+        self.iteration = state['iteration']
+        self.prototype_method = state['prototype_method']
+        self.prototype_trim_k = state['prototype_trim_k']
+        self.prototype_weight_power = state['prototype_weight_power']
+
+    def run_robust_pseudo_labeling(
+        self,
+        config: Dict,
+        *,
+        max_accuracy_drops: int = 3,
+        min_improvement: float = 0.001,
+        patience: int = 5,
+        always_restore_best: bool = True,
+        return_state: bool = False,
+        verbose: bool = True,
+    ) -> Dict:
+        """Run pseudo-labeling with early stopping and rollback protection.
+        
+        This method provides robust pseudo-labeling that:
+        - Tracks accuracy after each iteration
+        - Stops if accuracy drops too many times consecutively
+        - Can rollback to best state if final accuracy is worse
+        - Respects patience for stalled progress
+        
+        Args:
+            config: Dictionary with pseudo-labeling parameters:
+                - target_accuracy: Target validation accuracy (default: 0.70)
+                - initial_threshold: Starting confidence threshold (default: 0.05)
+                - min_threshold: Minimum threshold (default: 0.02)
+                - threshold_decay: Decay per stuck iteration (default: 0.01)
+                - sim_threshold: Cosine similarity threshold (default: None)
+                - min_sim_threshold: Minimum similarity (default: 0.20)
+                - sim_decay: Similarity decay (default: 0.02)
+                - sim_margin_threshold: Similarity margin (default: None)
+                - min_sim_margin_threshold: Minimum margin (default: 0.01)
+                - sim_margin_decay: Margin decay (default: 0.005)
+                - margin_threshold: Probability margin (default: None)
+                - mutual_nn_k: Mutual NN filter K (default: None)
+                - max_iterations: Maximum iterations (default: 50)
+                - max_per_class: Max samples per class per iteration (default: 5)
+                - use_true_labels: Simulation mode (default: False)
+            max_accuracy_drops: Stop after this many consecutive accuracy drops (default: 3)
+            min_improvement: Minimum accuracy gain to count as improvement (default: 0.001)
+            patience: Stop after this many iterations without improvement (default: 5)
+            always_restore_best: If True, always restore the best-seen state at the end (default: True).
+            return_state: If True, include a saved experiment snapshot in the return dict.
+            verbose: Print progress (default: True)
+            
+        Returns:
+            Dict with results including best_accuracy, final_accuracy, 
+            iterations_run, total_added, rolled_back flag.
+        """
+        # Allow passing a dataclass config (e.g., PseudoLabelConfig)
+        if hasattr(config, "__dataclass_fields__"):
+            config = asdict(config)
+
+        # Extract config with defaults
+        target_accuracy = config.get('target_accuracy', 0.70)
+        initial_threshold = config.get('initial_threshold', 0.05)
+        min_threshold = config.get('min_threshold', 0.02)
+        threshold_decay = config.get('threshold_decay', 0.01)
+        sim_threshold = config.get('sim_threshold')
+        min_sim_threshold = config.get('min_sim_threshold', 0.20)
+        sim_decay = config.get('sim_decay', 0.02)
+        sim_margin_threshold = config.get('sim_margin_threshold')
+        min_sim_margin_threshold = config.get('min_sim_margin_threshold', 0.01)
+        sim_margin_decay = config.get('sim_margin_decay', 0.005)
+        margin_threshold = config.get('margin_threshold')
+        min_margin_threshold = config.get('min_margin_threshold', 0.0)
+        margin_decay = config.get('margin_decay', 0.0)
+        mutual_nn_k = config.get('mutual_nn_k')
+        max_iterations = config.get('max_iterations', 50)
+        max_per_class = config.get('max_per_class', 5)
+        use_true_labels = config.get('use_true_labels', False)
+        
+        # Save initial state for potential rollback
+        initial_state = self.save_state()
+        initial_results = self.evaluate_on_val()
+        initial_accuracy = float(initial_results['accuracy'])
+        
+        best_state = initial_state
+        best_accuracy = initial_accuracy
+        best_iteration = 0
+        
+        current_threshold = float(initial_threshold)
+        current_sim = float(sim_threshold) if sim_threshold is not None else None
+        current_sim_margin = float(sim_margin_threshold) if sim_margin_threshold is not None else None
+        current_margin = float(margin_threshold) if margin_threshold is not None else None
+        
+        consecutive_drops = 0
+        iterations_without_improvement = 0
+        prev_accuracy = initial_accuracy
+        
+        if verbose:
+            config_name = config.get('name', 'Unnamed')
+            print(f"\n{'='*70}")
+            print(f"ROBUST PSEUDO-LABELING: {config_name}")
+            print(f"{'='*70}")
+            print(f"Starting accuracy: {initial_accuracy*100:.2f}%")
+            print(f"Target: {target_accuracy*100:.0f}% | Max drops: {max_accuracy_drops} | Patience: {patience}")
+            if current_sim is not None:
+                print(f"Sim threshold: {current_sim:.3f} → {min_sim_threshold:.3f}")
+            if current_sim_margin is not None:
+                print(f"Sim margin: {current_sim_margin:.3f} → {min_sim_margin_threshold:.3f}")
+            print(f"{'='*70}\n")
+        
+        iterations_run = 0
+        total_added = 0
+        
+        for iter_num in range(max_iterations):
+            if self.get_pool_count() == 0:
+                if verbose:
+                    print("Pool exhausted.")
+                break
+                
+            stats = self.run_iteration(
+                confidence_threshold=current_threshold,
+                max_per_class=max_per_class,
+                use_true_labels=use_true_labels,
+                margin_threshold=current_margin,
+                mutual_nn_k=mutual_nn_k,
+                sim_threshold=current_sim,
+                sim_margin_threshold=current_sim_margin,
+            )
+            
+            iterations_run += 1
+            current_accuracy = float(stats['accuracy_after'])
+            total_added += stats['n_added']
+            
+            # Check for new best
+            if current_accuracy > best_accuracy + min_improvement:
+                best_accuracy = current_accuracy
+                best_state = self.save_state()
+                best_iteration = iterations_run
+                iterations_without_improvement = 0
+                consecutive_drops = 0
+            else:
+                iterations_without_improvement += 1
+            
+            # Check for accuracy drop
+            if current_accuracy < prev_accuracy - 0.0001:
+                consecutive_drops += 1
+            else:
+                consecutive_drops = 0
+            
+            if verbose:
+                drop_marker = " ⚠️" if consecutive_drops > 0 else ""
+                best_marker = " ⭐" if current_accuracy >= best_accuracy else ""
+                print(f"Iter {iterations_run:3d} | Added: {stats['n_added']:3d} | "
+                      f"Acc: {current_accuracy*100:.2f}%{best_marker}{drop_marker} | "
+                      f"Support: {stats['support_count']} | Pool: {stats['pool_count']}")
+            
+            prev_accuracy = current_accuracy
+            
+            # Check stopping conditions
+            if current_accuracy >= target_accuracy:
+                if verbose:
+                    print(f"\n🎯 Target reached: {current_accuracy*100:.2f}%")
+                break
+                
+            if consecutive_drops >= max_accuracy_drops:
+                if verbose:
+                    print(f"\n⚠️ Stopping: {consecutive_drops} consecutive accuracy drops")
+                break
+                
+            if iterations_without_improvement >= patience:
+                if verbose:
+                    print(f"\n⏸️ Stopping: No improvement for {patience} iterations")
+                break
+            
+            # Decay thresholds if no candidates
+            if stats['n_candidates'] == 0 or stats['n_added'] == 0:
+                decayed = False
+                if current_threshold > min_threshold:
+                    current_threshold = max(min_threshold, current_threshold - threshold_decay)
+                    decayed = True
+                elif current_sim is not None and current_sim > min_sim_threshold:
+                    current_sim = max(min_sim_threshold, current_sim - sim_decay)
+                    decayed = True
+                elif current_sim_margin is not None and current_sim_margin > min_sim_margin_threshold:
+                    current_sim_margin = max(min_sim_margin_threshold, current_sim_margin - sim_margin_decay)
+                    decayed = True
+                    
+                if not decayed:
+                    if verbose:
+                        print("   → At minimum thresholds, stopping.")
+                    break
+        
+        # Decide whether to rollback / restore best
+        final_accuracy = self.evaluate_on_val()['accuracy']
+        rolled_back = False
+
+        if always_restore_best and best_iteration > 0:
+            if verbose:
+                print(f"\n🔄 Restoring best state (iter {best_iteration}, acc: {best_accuracy*100:.2f}%)")
+            self.restore_state(best_state)
+            rolled_back = True
+            final_accuracy = best_accuracy
+        elif final_accuracy < best_accuracy - min_improvement and best_iteration > 0:
+            if verbose:
+                print(f"\n🔄 Rolling back to best state (iter {best_iteration}, acc: {best_accuracy*100:.2f}%)")
+            self.restore_state(best_state)
+            rolled_back = True
+            final_accuracy = best_accuracy
+        
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"COMPLETE | Best: {best_accuracy*100:.2f}% | Final: {final_accuracy*100:.2f}%")
+            print(f"Iterations: {iterations_run} | Added: {total_added} | Rolled back: {rolled_back}")
+            print(f"{'='*70}")
+        
+        out = {
+            'config_name': config.get('name', 'Unnamed'),
+            'initial_accuracy': initial_accuracy,
+            'best_accuracy': best_accuracy,
+            'final_accuracy': final_accuracy,
+            'best_iteration': best_iteration,
+            'iterations_run': iterations_run,
+            'total_added': total_added,
+            'rolled_back': rolled_back,
+            'target_reached': final_accuracy >= target_accuracy,
+            'support_count': self.get_support_count(),
+            'pool_remaining': self.get_pool_count(),
+        }
+        if return_state:
+            out["state"] = self.save_state()
+        return out
+
+
+def run_pseudo_labeling_experiments(
+    ds_train,
+    support_indices: Dict[int, np.ndarray],
+    pool_indices: Dict[int, np.ndarray],
+    val_indices: Dict[int, np.ndarray],
+    test_indices: Dict[int, np.ndarray],
+    extractor: "FeatureExtractor",
+    configs: List[Dict],
+    n_support: int = 5,
+    seed: int = 42,
+    cache_dir: Optional[str] = None,
+    batch_size: int = 64,
+    use_fp16_embeddings: bool = True,
+    verbose: bool = True,
+    return_best_state: bool = False,
+) -> pd.DataFrame:
+    """Run multiple pseudo-labeling experiments and compare results.
+    
+    Each experiment starts from the same initial state (fresh experiment)
+    to ensure fair comparison. Results are collected into a DataFrame
+    for easy analysis.
+    
+    Args:
+        ds_train: DeepLake training dataset.
+        support_indices: Initial support set indices by class.
+        pool_indices: Unlabeled pool indices by class.
+        val_indices: Validation indices by class.
+        test_indices: Test indices by class.
+        extractor: FeatureExtractor instance.
+        configs: List of configuration dictionaries. Each should have:
+            - name: Descriptive name for the experiment
+            - prototype_method: 'mean', 'trimmed_mean', or 'weighted'
+            - prototype_trim_k: For trimmed methods (default: 1)
+            - prototype_weight_power: For weighted method (default: 2.0)
+            - Plus any run_robust_pseudo_labeling params
+        n_support: Initial support samples per class.
+        seed: Random seed.
+        cache_dir: Embedding cache directory.
+        batch_size: Batch size for extraction.
+        use_fp16_embeddings: Use float16 for embedding storage.
+        verbose: Print detailed progress.
+        
+    Returns:
+        pd.DataFrame with columns: name, prototype_method, initial_accuracy,
+        best_accuracy, final_accuracy, improvement, iterations, samples_added,
+        rolled_back, target_reached.
+    """
+    results = []
+    best_state = None
+    best_state_acc = float("-inf")
+    
+    print(f"\n{'#'*70}")
+    print(f"# PSEUDO-LABELING EXPERIMENT SUITE")
+    print(f"# {len(configs)} configurations to test")
+    print(f"{'#'*70}\n")
+    
+    for i, config in enumerate(configs):
+        # Allow passing a dataclass config (e.g., PseudoLabelConfig)
+        if hasattr(config, "__dataclass_fields__"):
+            config = asdict(config)
+
+        config_name = config.get('name', f'Config_{i+1}')
+        prototype_method = config.get('prototype_method', 'mean')
+        trim_k = config.get('prototype_trim_k', 1)
+        weight_power = config.get('prototype_weight_power', 2.0)
+        
+        print(f"\n[{i+1}/{len(configs)}] Running: {config_name}")
+        print(f"    Prototype: {prototype_method}", end="")
+        if prototype_method == 'trimmed_mean':
+            print(f" (trim_k={trim_k})")
+        elif prototype_method == 'weighted':
+            print(f" (power={weight_power})")
+        else:
+            print()
+        
+        # Create fresh experiment for each config
+        exp = FewShotExperiment(
+            ds_train=ds_train,
+            support_indices={k: v.copy() for k, v in support_indices.items()},
+            pool_indices={k: v.copy() for k, v in pool_indices.items()},
+            val_indices=val_indices,
+            test_indices=test_indices,
+            extractor=extractor,
+            n_support=n_support,
+            seed=seed,
+            cache_dir=cache_dir,
+            batch_size=batch_size,
+            use_fp16_embeddings=use_fp16_embeddings,
+        )
+        
+        # Configure prototype builder
+        exp.set_prototype_builder(
+            method=prototype_method,
+            trim_k=int(trim_k),
+            weight_power=float(weight_power),
+            recompute=True,
+        )
+        
+        # Run with this config
+        result = exp.run_robust_pseudo_labeling(
+            config,
+            verbose=verbose,
+            always_restore_best=True,
+            return_state=return_best_state,
+        )
+        
+        # Add prototype info to result
+        result['prototype_method'] = prototype_method
+        result['prototype_trim_k'] = trim_k if prototype_method == 'trimmed_mean' else None
+        result['prototype_weight_power'] = weight_power if prototype_method == 'weighted' else None
+        result['improvement'] = result['final_accuracy'] - result['initial_accuracy']
+        # Include key thresholds/filters in the results for clarity
+        for k in (
+            "initial_threshold",
+            "min_threshold",
+            "threshold_decay",
+            "sim_threshold",
+            "min_sim_threshold",
+            "sim_decay",
+            "sim_margin_threshold",
+            "min_sim_margin_threshold",
+            "sim_margin_decay",
+            "margin_threshold",
+            "mutual_nn_k",
+            "max_per_class",
+        ):
+            result[k] = config.get(k)
+
+        if return_best_state and result.get("state") is not None:
+            acc = float(result.get("best_accuracy", float("-inf")))
+            if acc > best_state_acc:
+                best_state = result["state"]
+                best_state_acc = acc
+        
+        results.append(result)
+        
+        # Clean up
+        del exp
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    # Create results DataFrame
+    df = pd.DataFrame(results)
+    
+    # Sort by best accuracy descending (final is often restored to best)
+    df = df.sort_values('best_accuracy', ascending=False).reset_index(drop=True)
+    
+    # Print summary
+    print(f"\n{'='*80}")
+    print("EXPERIMENT RESULTS SUMMARY")
+    print(f"{'='*80}")
+    print(df[['config_name', 'prototype_method', 'initial_accuracy', 'best_accuracy', 
+              'final_accuracy', 'improvement', 'iterations_run', 'total_added', 
+              'rolled_back', 'target_reached']].to_string(index=False))
+    print(f"{'='*80}")
+    
+    best_config = df.iloc[0]
+    print(f"\n🏆 BEST CONFIG: {best_config['config_name']}")
+    print(f"   Final accuracy: {best_config['final_accuracy']*100:.2f}%")
+    print(f"   Improvement: {best_config['improvement']*100:+.2f}%")
+    
+    if return_best_state:
+        df.attrs["best_state"] = best_state
+    return df
+
+
+@dataclass(frozen=True)
+class PseudoLabelConfig:
+    """Typed config for pseudo-label sweeps (prototype method + thresholds + NN filter)."""
+
+    name: str
+
+    # Prototype computation
+    prototype_method: str = "mean"  # mean | trimmed_mean | weighted
+    prototype_trim_k: int = 1
+    prototype_weight_power: float = 2.0
+
+    # Robust loop targets
+    target_accuracy: float = 0.70
+    max_iterations: int = 50
+    max_per_class: int = 5
+    use_true_labels: bool = False
+
+    # Probability gates (optional / secondary for many-class problems)
+    initial_threshold: float = 0.05
+    min_threshold: float = 0.02
+    threshold_decay: float = 0.01
+    margin_threshold: Optional[float] = None
+    min_margin_threshold: float = 0.0
+    margin_decay: float = 0.0
+
+    # Similarity gates (recommended primary gates)
+    sim_threshold: Optional[float] = None
+    min_sim_threshold: float = 0.20
+    sim_decay: float = 0.02
+    sim_margin_threshold: Optional[float] = None
+    min_sim_margin_threshold: float = 0.01
+    sim_margin_decay: float = 0.005
+
+    # Mutual nearest-neighbor filter (optional)
+    mutual_nn_k: Optional[int] = None
+
+
+def make_pseudo_label_config_grid(
+    *,
+    base: PseudoLabelConfig,
+    grid: Dict[str, List],
+) -> List[PseudoLabelConfig]:
+    """Generate a list of configs by varying fields on a base config."""
+    if not grid:
+        return [base]
+
+    valid_fields = set(getattr(base, "__dataclass_fields__", {}).keys())
+    for k in grid.keys():
+        if k not in valid_fields:
+            raise ValueError(f"Unknown config field in grid: {k}")
+
+    items = list(grid.items())
+    configs: List[PseudoLabelConfig] = []
+
+    def rec(i: int, current: PseudoLabelConfig) -> None:
+        if i == len(items):
+            configs.append(current)
+            return
+        field, values = items[i]
+        for v in values:
+            rec(i + 1, replace(current, **{field: v}))
+
+    rec(0, base)
+    return configs
+
+
+def run_pseudo_labeling_experiments_from_experiment(
+    exp: FewShotExperiment,
+    configs: List[Dict],
+    *,
+    verbose: bool = True,
+    return_best_state: bool = True,
+) -> pd.DataFrame:
+    """Convenience wrapper to sweep configs starting from an existing experiment state."""
+    return run_pseudo_labeling_experiments(
+        ds_train=exp.ds_train,
+        support_indices={k: v.copy() for k, v in exp.support_indices.items()},
+        pool_indices={k: v.copy() for k, v in exp.pool_indices.items()},
+        val_indices=exp.val_indices,
+        test_indices=exp.test_indices,
+        extractor=exp.extractor,
+        configs=configs,
+        n_support=exp.n_support,
+        seed=exp.seed,
+        cache_dir=str(exp.cache_dir),
+        batch_size=exp.batch_size,
+        use_fp16_embeddings=exp.use_fp16_embeddings,
+        verbose=verbose,
+        return_best_state=return_best_state,
+    )
+
+
+def apply_best_state_from_results(exp: FewShotExperiment, results_df: pd.DataFrame) -> None:
+    """Restore the best saved state from `run_pseudo_labeling_experiments(..., return_best_state=True)`."""
+    state = getattr(results_df, "attrs", {}).get("best_state")
+    if state is None:
+        raise ValueError("No best_state found in results_df.attrs; run with return_best_state=True.")
+    exp.restore_state(state)
 
 
 # ============================================
