@@ -53,14 +53,14 @@ class LearnedProjectionHead(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
         
-        # Wider network with residual-style connection
+        # Use LayerNorm (more stable than BatchNorm for episodic/meta settings)
         self.projection = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),  # Extra layer
-            nn.BatchNorm1d(hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, output_dim)
@@ -114,22 +114,25 @@ def prototypical_loss(
     query_embeddings: torch.Tensor,
     query_labels: torch.Tensor,
     prototypes: torch.Tensor,
-    temperature: float = 0.1,  # Lower temperature for sharper predictions
-    use_cosine: bool = True    # Use cosine similarity instead of Euclidean
+    temperature: float = 1.0,  # Standard temperature - was 0.1 which is WAY too low!
+    use_cosine: bool = False   # Use Euclidean distance (original ProtoNet paper)
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute Prototypical Networks loss.
     
+    IMPORTANT: Original ProtoNet uses EUCLIDEAN distance, not cosine!
+    Temperature should be 1.0 for standard training.
+    
     For each query sample:
-    1. Compute similarity/distance to all prototypes
-    2. Convert to probabilities (softmax)
+    1. Compute distance to all prototypes
+    2. Convert to probabilities (softmax over negative distances)
     3. Cross-entropy loss against true label
     
     Args:
-        query_embeddings: [N_query, D] query sample embeddings (L2 normalized)
+        query_embeddings: [N_query, D] query sample embeddings
         query_labels: [N_query] ground truth labels (0 to n_classes-1)
-        prototypes: [n_classes, D] class prototypes (L2 normalized)
-        temperature: Softmax temperature (lower = sharper predictions)
+        prototypes: [n_classes, D] class prototypes
+        temperature: Softmax temperature (1.0 is standard)
         use_cosine: If True, use cosine similarity; else Euclidean distance
     
     Returns:
@@ -137,12 +140,13 @@ def prototypical_loss(
         accuracy: Classification accuracy on queries
     """
     if use_cosine:
-        # Cosine similarity (embeddings are already L2 normalized)
-        # Shape: [N_query, n_classes]
-        similarities = torch.mm(query_embeddings, prototypes.t())
+        # Cosine similarity
+        query_norm = F.normalize(query_embeddings, p=2, dim=1)
+        proto_norm = F.normalize(prototypes, p=2, dim=1)
+        similarities = torch.mm(query_norm, proto_norm.t())
         log_probs = F.log_softmax(similarities / temperature, dim=1)
     else:
-        # Euclidean distance
+        # Euclidean distance (ORIGINAL ProtoNet)
         dists = torch.cdist(query_embeddings, prototypes, p=2)
         log_probs = F.log_softmax(-dists / temperature, dim=1)
     
@@ -177,7 +181,7 @@ class EpisodeSampler:
         n_way: int = 30,
         k_shot: int = 5,
         n_query: int = 10,
-        min_samples_per_class: int = 15,
+        min_samples_per_class: Optional[int] = None,
         seed: int = 42
     ):
         """
@@ -196,6 +200,8 @@ class EpisodeSampler:
         
         # Filter classes with enough samples
         min_needed = k_shot + n_query
+        if min_samples_per_class is None:
+            min_samples_per_class = min_needed
         self.eligible_classes = [
             cid for cid, indices in class_to_indices.items()
             if len(indices) >= max(min_needed, min_samples_per_class)
@@ -207,8 +213,12 @@ class EpisodeSampler:
             if cid in self.eligible_classes
         }
         
+        n_excluded = len(class_to_indices) - len(self.eligible_classes)
         print(f"EpisodeSampler initialized:")
         print(f"  Eligible classes: {len(self.eligible_classes)}/{len(class_to_indices)}")
+        if n_excluded > 0:
+            print(f"  ⚠️  WARNING: {n_excluded} classes excluded from training (< {max(min_needed, min_samples_per_class)} samples)")
+            print(f"      These classes will still appear in 555-way evaluation!")
         print(f"  Episode config: {n_way}-way {k_shot}-shot with {n_query} queries")
     
     def sample_episode(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -290,55 +300,72 @@ class PrecomputedEmbeddingDataset(Dataset):
 
 class PrototypicalNetwork(nn.Module):
     """
-    Full Prototypical Network with learnable embedding projection.
+    Prototypical Network with MINIMAL learnable projection.
     
-    Architecture:
-        Frozen Backbone (EfficientNet) → Learnable Projection → L2 Normalize
+    CRITICAL INSIGHT: The frozen embeddings already achieve 51.8% accuracy!
+    We should NOT destroy this structure. Instead, we learn a SMALL refinement.
     
-    Training:
-        Episodic training with support/query splits per episode
-        
-    Key design choices for 555 fine-grained classes:
-        - Larger embedding_dim (512) to preserve discriminative info
-        - Deeper network (3 layers) for better feature learning
-        - Lower dropout to preserve information
+    Options:
+    1. identity: No projection, just use frozen embeddings (baseline)
+    2. linear: Single linear layer (minimal transformation)
+    3. mlp: Small MLP with residual connection (preserves structure)
+    
+    The key is to PRESERVE the pretrained structure while learning refinements.
     """
     def __init__(
         self,
         input_dim: int = 1792,
-        hidden_dim: int = 1024,   # Larger hidden layer
-        embedding_dim: int = 512,  # Much larger output for 555 classes
-        dropout: float = 0.1       # Less dropout
+        hidden_dim: int = 1792,   # Same as input to preserve info
+        embedding_dim: int = 1792, # Keep original dimension!
+        dropout: float = 0.0,      # No dropout
+        mode: str = "residual"     # "identity", "linear", or "residual"
     ):
         super().__init__()
         
+        self.input_dim = input_dim
         self.embedding_dim = embedding_dim
+        self.mode = mode
         
-        # Deeper projection head with residual-style architecture
-        self.projection = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),  # Additional layer
-            nn.BatchNorm1d(hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embedding_dim)
-        )
+        if mode == "identity":
+            # No learnable parameters - just pass through
+            self.projection = nn.Identity()
+        elif mode == "linear":
+            # Single linear transformation
+            self.projection = nn.Linear(input_dim, embedding_dim)
+            # Initialize close to identity if dimensions match
+            if input_dim == embedding_dim:
+                nn.init.eye_(self.projection.weight)
+                nn.init.zeros_(self.projection.bias)
+        elif mode == "residual":
+            # Small MLP with residual connection
+            # This learns a REFINEMENT to the original embeddings
+            self.transform = nn.Sequential(
+                nn.Linear(input_dim, hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, embedding_dim)
+            )
+            # Initialize to output near-zero so residual starts as identity
+            nn.init.zeros_(self.transform[-1].weight)
+            nn.init.zeros_(self.transform[-1].bias)
+            
+            # Learnable residual weight (starts small)
+            self.residual_scale = nn.Parameter(torch.tensor(0.1))
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass: project and normalize embeddings.
+        Forward pass: apply minimal projection.
         
-        Args:
-            x: [N, input_dim] frozen backbone embeddings
-        
-        Returns:
-            [N, embedding_dim] L2-normalized projected embeddings
+        Does NOT L2 normalize - that should be done explicitly if needed.
         """
-        x = self.projection(x)
-        return F.normalize(x, p=2, dim=1)
+        if self.mode == "identity":
+            return x
+        elif self.mode == "linear":
+            return self.projection(x)
+        elif self.mode == "residual":
+            # Residual: original + small learned refinement
+            return x + self.residual_scale * self.transform(x)
     
     def forward_episode(
         self,
@@ -349,15 +376,6 @@ class PrototypicalNetwork(nn.Module):
     ) -> torch.Tensor:
         """
         Process a complete episode.
-        
-        Args:
-            support_embeddings: [N_support, input_dim] support set embeddings
-            support_labels: [N_support] support labels (0 to n_way-1)
-            query_embeddings: [N_query, input_dim] query set embeddings
-            n_way: Number of classes in this episode
-        
-        Returns:
-            [N_query, n_way] negative distances to prototypes (logits)
         """
         # Project embeddings
         support_proj = self.forward(support_embeddings)
@@ -366,7 +384,7 @@ class PrototypicalNetwork(nn.Module):
         # Compute prototypes
         prototypes = compute_prototypes(support_proj, support_labels, n_way)
         
-        # Compute negative distances as scores
+        # Compute negative distances as scores (Euclidean distance)
         dists = torch.cdist(query_proj, prototypes, p=2)
         
         return -dists  # Negative distance = higher score for closer prototypes
@@ -389,7 +407,10 @@ def train_projection_head_episodic(
     weight_decay: float = 1e-4,
     val_embeddings: Optional[np.ndarray] = None,
     val_labels: Optional[np.ndarray] = None,
+    eval_class_to_indices: Optional[Dict[int, np.ndarray]] = None,
+    eval_use_all_support: bool = False,
     val_every: int = 100,
+    min_samples_per_class: Optional[int] = None,
     seed: int = 42,
     verbose: bool = True
 ) -> Dict:
@@ -426,6 +447,7 @@ def train_projection_head_episodic(
         n_way=n_way,
         k_shot=k_shot,
         n_query=n_query,
+        min_samples_per_class=min_samples_per_class,
         seed=seed
     )
     
@@ -444,6 +466,9 @@ def train_projection_head_episodic(
     # Running averages
     running_loss = 0.0
     running_acc = 0.0
+
+    best_val_acc = float("-inf")
+    best_state = None
     
     model.train()
     pbar = tqdm(range(n_episodes), desc="Episodic Training", disable=not verbose)
@@ -461,16 +486,17 @@ def train_projection_head_episodic(
         # Forward pass
         optimizer.zero_grad()
         
-        # Project embeddings (already L2 normalized from model)
+        # Project embeddings
         support_proj = model(support_emb)
         query_proj = model(query_emb)
         
-        # Compute prototypes and normalize them
+        # Compute prototypes (mean of support embeddings per class)
+        # DO NOT normalize - use raw Euclidean distance like original ProtoNet
         prototypes = compute_prototypes(support_proj, support_labels_t, n_way)
-        prototypes = F.normalize(prototypes, p=2, dim=1)  # L2 normalize prototypes
         
-        # Compute loss (using cosine similarity)
-        loss, acc = prototypical_loss(query_proj, query_labels_t, prototypes)
+        # Compute loss using Euclidean distance (original ProtoNet)
+        loss, acc = prototypical_loss(query_proj, query_labels_t, prototypes, 
+                                       temperature=1.0, use_cosine=False)
         
         # Backward pass
         loss.backward()
@@ -490,11 +516,22 @@ def train_projection_head_episodic(
         
         # Validation
         if val_embeddings is not None and (episode_idx + 1) % val_every == 0:
+            eval_mapping = eval_class_to_indices if eval_class_to_indices is not None else class_to_indices
             val_acc = evaluate_protonet(
-                model, all_embeddings, class_to_indices, 
-                val_embeddings, val_labels, device, n_way, k_shot
+                model,
+                all_embeddings,
+                eval_mapping,
+                val_embeddings,
+                val_labels,
+                device,
+                n_way=555,
+                k_shot=k_shot,
+                use_all_support=bool(eval_use_all_support),
             )
             history['val_acc'].append(val_acc)
+            if val_acc > best_val_acc:
+                best_val_acc = float(val_acc)
+                best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
             
             if verbose:
                 tqdm.write(f"Episode {episode_idx+1}: Val Acc = {val_acc*100:.2f}%")
@@ -506,6 +543,9 @@ def train_projection_head_episodic(
             history['train_acc'].append(running_acc)
             history['lr'].append(scheduler.get_last_lr()[0])
     
+    if best_state is not None:
+        model.load_state_dict(best_state, strict=True)
+    history["best_val_acc"] = best_val_acc if best_val_acc != float("-inf") else None
     return history
 
 
@@ -568,8 +608,7 @@ def evaluate_protonet(
     with torch.no_grad():
         support_proj = model(support_embs)
         prototypes = compute_prototypes(support_proj, support_labels, len(unique_classes))
-        # L2 normalize prototypes for cosine similarity
-        prototypes = F.normalize(prototypes, p=2, dim=1)
+        # DO NOT normalize - use Euclidean distance consistently with training
         
         # Process validation in batches
         val_embs = torch.from_numpy(val_embeddings).float()
@@ -578,10 +617,10 @@ def evaluate_protonet(
         
         for i in range(0, len(val_embs), batch_size):
             batch = val_embs[i:i+batch_size].to(device)
-            batch_proj = model(batch)  # Already L2 normalized from model
-            # Use cosine similarity (dot product of normalized vectors)
-            similarities = torch.mm(batch_proj, prototypes.t())
-            preds = similarities.argmax(dim=1).cpu().numpy()
+            batch_proj = model(batch)
+            # Use Euclidean distance (same as training)
+            dists = torch.cdist(batch_proj, prototypes, p=2)
+            preds = dists.argmin(dim=1).cpu().numpy()  # argmin for distance
             all_preds.extend(preds)
     
     # Convert predictions back to original class IDs
@@ -599,13 +638,13 @@ def evaluate_frozen_baseline(
     class_to_indices: Dict[int, np.ndarray],
     val_embeddings: np.ndarray,
     val_labels: np.ndarray,
-    k_shot: int = 5
+    k_shot: int = 5,
+    use_euclidean: bool = True  # Match the training metric
 ) -> float:
     """
     Evaluate baseline accuracy using frozen embeddings (no learned projection).
     
-    This is your current approach - just compute prototypes from frozen embeddings
-    and classify by nearest prototype.
+    Uses the same distance metric as training for fair comparison.
     """
     # Get unique classes
     unique_classes = sorted(class_to_indices.keys())
@@ -619,13 +658,21 @@ def evaluate_frozen_baseline(
         if len(indices) > 0:
             prototypes[class_to_idx[class_id]] = train_embeddings[indices].mean(axis=0)
     
-    # L2 normalize
-    prototypes = prototypes / (np.linalg.norm(prototypes, axis=1, keepdims=True) + 1e-8)
-    val_emb_norm = val_embeddings / (np.linalg.norm(val_embeddings, axis=1, keepdims=True) + 1e-8)
-    
-    # Cosine similarity (equivalent to negative distance for normalized vectors)
-    similarities = val_emb_norm @ prototypes.T
-    pred_indices = similarities.argmax(axis=1)
+    if use_euclidean:
+        # Euclidean distance (to match ProtoNet training)
+        # Compute pairwise distances: (N_val, N_classes)
+        # ||a - b||^2 = ||a||^2 + ||b||^2 - 2*a.b
+        val_sq = np.sum(val_embeddings ** 2, axis=1, keepdims=True)  # (N_val, 1)
+        proto_sq = np.sum(prototypes ** 2, axis=1, keepdims=True).T  # (1, N_classes)
+        cross = val_embeddings @ prototypes.T  # (N_val, N_classes)
+        dists = val_sq + proto_sq - 2 * cross
+        pred_indices = dists.argmin(axis=1)  # argmin for distance
+    else:
+        # Cosine similarity (original implementation)
+        prototypes = prototypes / (np.linalg.norm(prototypes, axis=1, keepdims=True) + 1e-8)
+        val_emb_norm = val_embeddings / (np.linalg.norm(val_embeddings, axis=1, keepdims=True) + 1e-8)
+        similarities = val_emb_norm @ prototypes.T
+        pred_indices = similarities.argmax(axis=1)
     
     # Convert to class IDs
     idx_to_class = {i: cid for cid, i in class_to_idx.items()}
@@ -693,6 +740,7 @@ def run_prototypical_network_experiment(
     n_query: int = 10,
     lr: float = 5e-4,            # Lower learning rate for stability
     embedding_dim: int = 512,    # Larger output for 555 classes
+    min_samples_per_class: Optional[int] = None,  # None = k_shot + n_query (minimum needed)
     seed: int = 42
 ) -> Dict:
     """
@@ -791,13 +839,15 @@ def run_prototypical_network_experiment(
     print(f"  Episode config: {n_way}-way {k_shot}-shot {n_query}-query")
     print(f"  Learning rate: {lr}")
     print(f"  Embedding dimension: {embedding_dim}")
-    print(f"  Distance metric: Cosine similarity")
+    print(f"  Distance metric: Euclidean (original ProtoNet)")
+    print(f"  Projection mode: residual (preserves pretrained structure)")
     
     model = PrototypicalNetwork(
         input_dim=train_embeddings.shape[1],
-        hidden_dim=1024,         # Larger hidden layer
-        embedding_dim=embedding_dim,
-        dropout=0.1              # Less dropout
+        hidden_dim=train_embeddings.shape[1],  # Same as input
+        embedding_dim=train_embeddings.shape[1],  # Keep original dimension!
+        dropout=0.0,
+        mode="residual"  # Preserves pretrained structure
     )
     
     history = train_projection_head_episodic(
@@ -812,7 +862,10 @@ def run_prototypical_network_experiment(
         lr=lr,
         val_embeddings=val_embeddings,
         val_labels=val_labels,
+        eval_class_to_indices=support_class_to_pos,  # evaluate exactly on 5-shot support
+        eval_use_all_support=True,                   # mapping already contains the chosen support
         val_every=200,
+        min_samples_per_class=min_samples_per_class,
         seed=seed
     )
     
