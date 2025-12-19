@@ -1903,6 +1903,8 @@ class FewShotExperiment:
         *,
         margin_threshold: Optional[float] = None,
         mutual_nn_k: Optional[int] = None,
+        sim_threshold: Optional[float] = None,
+        sim_margin_threshold: Optional[float] = None,
     ) -> Dict[int, List[Dict]]:
         """Get high-confidence predictions from the unlabeled pool.
 
@@ -1910,20 +1912,26 @@ class FewShotExperiment:
         confidence threshold, grouped by predicted class.
 
         Optional filters:
-        - margin_threshold: require p(top1) - p(top2) >= margin_threshold.
+        - margin_threshold: require p(top1) - p(top2) >= margin_threshold (probability space).
         - mutual_nn_k: mutual nearest-neighbor style filter; keep a sample only if it is
           among the top-K most similar pool samples to its predicted class prototype.
+        - sim_threshold: require cosine similarity to predicted prototype >= sim_threshold.
+          More reliable than softmax probability for many-class problems.
+        - sim_margin_threshold: require sim(top1) - sim(top2) >= sim_margin_threshold.
+          Ensures clear separation between top predictions in embedding space.
 
         Args:
-            threshold: Minimum confidence score for inclusion.
+            threshold: Minimum confidence score (softmax probability) for inclusion.
             max_per_class: Optional limit on candidates per class.
             margin_threshold: Optional minimum probability margin between top-1 and top-2.
             mutual_nn_k: Optional K for mutual nearest-neighbor filter.
+            sim_threshold: Optional minimum cosine similarity to predicted prototype.
+            sim_margin_threshold: Optional minimum similarity gap between top-1 and top-2.
 
         Returns:
             Dict[int, List[Dict]]: Dictionary mapping predicted class IDs to
                 lists of candidate dictionaries with keys: idx, pred_class,
-                confidence, true_class.
+                confidence, true_class, similarity, sim_margin.
         """
         # Flatten pool indices
         pool_flat = flatten_indices(self.pool_indices)
@@ -1945,6 +1953,15 @@ class FewShotExperiment:
         pred_indices = np.argmax(similarities, axis=1)
         predictions = self.class_ids[pred_indices]
         confidences = np.max(probs, axis=1)
+        
+        # Raw cosine similarity to predicted prototype (more reliable than softmax for many classes)
+        top1_similarities = np.max(similarities, axis=1)
+        
+        # Similarity margin: gap between top-1 and top-2 in embedding space
+        top2_sims = np.partition(similarities, kth=-2, axis=1)[:, -2:]
+        sim_top1 = np.max(top2_sims, axis=1)
+        sim_top2 = np.min(top2_sims, axis=1)
+        sim_margins = sim_top1 - sim_top2
 
         # Top-2 margin in probability space
         if margin_threshold is not None:
@@ -1977,10 +1994,18 @@ class FewShotExperiment:
         # Get true labels for evaluation
         true_labels = get_labels_for_indices(self.ds_train, pool_flat)
         
-        # Filter by confidence threshold
+        # Filter by confidence threshold (softmax probability)
         high_conf_mask = confidences >= threshold
         if margins is not None:
             high_conf_mask = high_conf_mask & (margins >= float(margin_threshold))
+        
+        # Filter by raw similarity threshold (more reliable for many-class problems)
+        if sim_threshold is not None:
+            high_conf_mask = high_conf_mask & (top1_similarities >= float(sim_threshold))
+        
+        # Filter by similarity margin (separation in embedding space)
+        if sim_margin_threshold is not None:
+            high_conf_mask = high_conf_mask & (sim_margins >= float(sim_margin_threshold))
         
         # Organize by predicted class
         results = defaultdict(list)
@@ -1998,11 +2023,13 @@ class FewShotExperiment:
                     'confidence': float(conf),
                     'true_class': int(true_label),
                     'margin': float(margins[i]) if margins is not None else None,
+                    'similarity': float(top1_similarities[i]),
+                    'sim_margin': float(sim_margins[i]),
                 })
         
-        # Sort by confidence and limit per class
+        # Sort by similarity (more reliable) then confidence, and limit per class
         for class_id in results:
-            results[class_id].sort(key=lambda x: x['confidence'], reverse=True)
+            results[class_id].sort(key=lambda x: (x['similarity'], x['confidence']), reverse=True)
             if max_per_class is not None:
                 results[class_id] = results[class_id][:max_per_class]
         
@@ -2045,6 +2072,7 @@ class FewShotExperiment:
         # Recompute prototypes
         self.prototypes, self.class_ids = self._compute_prototypes_from_cache()
         self.class_id_to_idx = {cid: i for i, cid in enumerate(self.class_ids)}
+
     def run_iteration(
         self,
         confidence_threshold: float = 0.8,
@@ -2053,6 +2081,8 @@ class FewShotExperiment:
         *,
         margin_threshold: Optional[float] = None,
         mutual_nn_k: Optional[int] = None,
+        sim_threshold: Optional[float] = None,
+        sim_margin_threshold: Optional[float] = None,
     ) -> Dict:
         """Run one iteration of pseudo-labeling.
 
@@ -2065,6 +2095,10 @@ class FewShotExperiment:
             max_per_class: Maximum samples to add per class per iteration.
             use_true_labels: If True, only accept correct predictions (simulation).
                 If False, accept all high-confidence predictions.
+            margin_threshold: Optional minimum probability margin (top1 - top2).
+            mutual_nn_k: Optional K for mutual nearest-neighbor filter.
+            sim_threshold: Optional minimum cosine similarity to predicted prototype.
+            sim_margin_threshold: Optional minimum similarity gap (sim_top1 - sim_top2).
 
         Returns:
             Dict: Iteration statistics including n_added, accuracy, support size, etc.
@@ -2077,6 +2111,8 @@ class FewShotExperiment:
             max_per_class=max_per_class,
             margin_threshold=margin_threshold,
             mutual_nn_k=mutual_nn_k,
+            sim_threshold=sim_threshold,
+            sim_margin_threshold=sim_margin_threshold,
         )
 
         n_candidates = sum(len(v) for v in high_conf.values())
@@ -2109,7 +2145,9 @@ class FewShotExperiment:
                     'idx': int(cand['idx']),
                     'pred_class': int(cand['pred_class']),
                     'true_class': int(cand['true_class']),
-                    'confidence': float(cand['confidence'])
+                    'confidence': float(cand['confidence']),
+                    'similarity': float(cand.get('similarity', 0.0)),
+                    'sim_margin': float(cand.get('sim_margin', 0.0)),
                 })
 
         for class_id, idxs in to_add_by_class.items():
@@ -2125,6 +2163,8 @@ class FewShotExperiment:
             'threshold_used': float(confidence_threshold),
             'margin_threshold_used': float(margin_threshold) if margin_threshold is not None else None,
             'mutual_nn_k_used': int(mutual_nn_k) if mutual_nn_k is not None else None,
+            'sim_threshold_used': float(sim_threshold) if sim_threshold is not None else None,
+            'sim_margin_threshold_used': float(sim_margin_threshold) if sim_margin_threshold is not None else None,
 
             # candidates / adds
             'n_candidates': int(n_candidates),
@@ -2353,6 +2393,131 @@ class FewShotExperiment:
             print(f"\nAccuracy improvement: {first_acc*100:.2f}% → {last_acc*100:.2f}% ({(last_acc-first_acc)*100:+.2f}%)")
         print(f"{'='*60}")
 
+    def calibrate_thresholds(
+        self,
+        target_precision: float = 0.90,
+        verbose: bool = True,
+    ) -> Dict[str, float]:
+        """Calibrate pseudo-labeling thresholds using validation split.
+        
+        Analyzes the pool predictions to find threshold values that would
+        achieve the target pseudo-label precision. Uses similarity and
+        similarity margin as primary signals (more reliable than softmax
+        for many-class problems).
+        
+        Args:
+            target_precision: Target precision for pseudo-labels (e.g., 0.90 = 90%).
+            verbose: Whether to print analysis details.
+            
+        Returns:
+            Dict with recommended thresholds: sim_threshold, sim_margin_threshold,
+            and estimated precision/recall at those thresholds.
+        """
+        # Get all pool predictions with full info
+        pool_flat = flatten_indices(self.pool_indices)
+        if len(pool_flat) == 0:
+            print("Pool is empty, cannot calibrate.")
+            return {}
+        
+        pool_embeddings = self._train_embeddings[pool_flat]
+        prototypes_norm = self.prototypes / (np.linalg.norm(self.prototypes, axis=1, keepdims=True) + 1e-8)
+        pool_emb_norm = pool_embeddings / (np.linalg.norm(pool_embeddings, axis=1, keepdims=True) + 1e-8)
+        similarities = pool_emb_norm @ prototypes_norm.T
+        
+        pred_indices = np.argmax(similarities, axis=1)
+        predictions = self.class_ids[pred_indices]
+        
+        # Get similarity and margin for each sample
+        top1_similarities = np.max(similarities, axis=1)
+        top2_sims = np.partition(similarities, kth=-2, axis=1)[:, -2:]
+        sim_margins = np.max(top2_sims, axis=1) - np.min(top2_sims, axis=1)
+        
+        # Get true labels
+        true_labels = get_labels_for_indices(self.ds_train, pool_flat)
+        is_correct = (predictions == true_labels)
+        
+        if verbose:
+            print(f"\n{'='*70}")
+            print("THRESHOLD CALIBRATION ANALYSIS")
+            print(f"{'='*70}")
+            print(f"Pool size: {len(pool_flat)}")
+            print(f"Overall pseudo-label accuracy (no threshold): {is_correct.mean()*100:.2f}%")
+            print(f"\nSimilarity distribution:")
+            print(f"  Min: {top1_similarities.min():.4f}")
+            print(f"  Mean: {top1_similarities.mean():.4f}")
+            print(f"  Max: {top1_similarities.max():.4f}")
+            print(f"  Correct samples mean: {top1_similarities[is_correct].mean():.4f}")
+            print(f"  Wrong samples mean: {top1_similarities[~is_correct].mean():.4f}")
+            print(f"\nSimilarity margin distribution:")
+            print(f"  Min: {sim_margins.min():.4f}")
+            print(f"  Mean: {sim_margins.mean():.4f}")
+            print(f"  Max: {sim_margins.max():.4f}")
+            print(f"  Correct samples mean: {sim_margins[is_correct].mean():.4f}")
+            print(f"  Wrong samples mean: {sim_margins[~is_correct].mean():.4f}")
+        
+        # Find thresholds that achieve target precision
+        # Try combinations of sim_threshold and sim_margin_threshold
+        best_result = None
+        best_recall = 0.0
+        
+        sim_thresholds = np.linspace(top1_similarities.min(), top1_similarities.max(), 20)
+        margin_thresholds = np.linspace(0, sim_margins.max(), 20)
+        
+        for sim_t in sim_thresholds:
+            for margin_t in margin_thresholds:
+                mask = (top1_similarities >= sim_t) & (sim_margins >= margin_t)
+                n_selected = mask.sum()
+                if n_selected == 0:
+                    continue
+                
+                precision = is_correct[mask].mean()
+                recall = is_correct[mask].sum() / is_correct.sum() if is_correct.sum() > 0 else 0
+                
+                if precision >= target_precision and recall > best_recall:
+                    best_recall = recall
+                    best_result = {
+                        'sim_threshold': float(sim_t),
+                        'sim_margin_threshold': float(margin_t),
+                        'precision': float(precision),
+                        'recall': float(recall),
+                        'n_selected': int(n_selected),
+                        'n_correct': int(is_correct[mask].sum()),
+                    }
+        
+        if best_result is None:
+            # Fallback: find highest precision achievable
+            for sim_t in np.linspace(top1_similarities.max(), top1_similarities.min(), 50):
+                mask = top1_similarities >= sim_t
+                if mask.sum() > 0:
+                    precision = is_correct[mask].mean()
+                    if precision >= 0.8:  # At least 80%
+                        best_result = {
+                            'sim_threshold': float(sim_t),
+                            'sim_margin_threshold': 0.0,
+                            'precision': float(precision),
+                            'recall': float(is_correct[mask].sum() / is_correct.sum()),
+                            'n_selected': int(mask.sum()),
+                            'n_correct': int(is_correct[mask].sum()),
+                        }
+                        break
+        
+        if verbose and best_result:
+            print(f"\n{'='*70}")
+            print(f"RECOMMENDED THRESHOLDS (target precision ≥ {target_precision*100:.0f}%)")
+            print(f"{'='*70}")
+            print(f"  sim_threshold: {best_result['sim_threshold']:.4f}")
+            print(f"  sim_margin_threshold: {best_result['sim_margin_threshold']:.4f}")
+            print(f"\nExpected performance:")
+            print(f"  Precision: {best_result['precision']*100:.1f}%")
+            print(f"  Recall: {best_result['recall']*100:.1f}%")
+            print(f"  Samples selected: {best_result['n_selected']} ({best_result['n_correct']} correct)")
+            print(f"{'='*70}")
+        elif verbose:
+            print(f"\n⚠️ Could not find thresholds achieving {target_precision*100:.0f}% precision.")
+            print("Consider using more conservative thresholds or improving the base model.")
+        
+        return best_result or {}
+
     def print_metrics_summary(self):
         """Print a table of metrics for all iterations.
 
@@ -2535,9 +2700,9 @@ class FewShotExperiment:
             print(f"  Wrong (rejected): {total_wrong}")
 
         if current_accuracy >= target_accuracy:
-            print(f"\n✅ SUCCESS: Target accuracy of {target_accuracy*100:.0f}% reached!")
+            print(f"\nSUCCESS: Target accuracy of {target_accuracy*100:.0f}% reached!")
         else:
-            print(f"\n⚠️ Target not reached. Current: {current_accuracy*100:.2f}%")
+            print(f"\nTarget not reached. Current: {current_accuracy*100:.2f}%")
 
         print(f"{'='*70}")
 
@@ -3321,8 +3486,6 @@ def spot_check_pseudo_labels(
     print(f"{'='*70}")
     print(f"Spot check: {n_to_check} Random Pseudo-Labels (out of {len(all_added)} total)")
     print(f"{'='*70}")
-    print("Compare each candidate (blue) with the reference image (green).")
-    print("The ground truth (green/red) is revealed below each candidate.\n")
     
     # Display in a grid: 2 columns per sample (reference + candidate)
     n_cols = min(5, n_to_check)  # Max 5 pairs per row
