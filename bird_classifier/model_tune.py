@@ -128,6 +128,268 @@ def load_label_index(path) -> Dict[int, np.ndarray]:
 
 
 # =============================================================================
+# EXPERIMENT PERSISTENCE (for resuming across Colab sessions)
+# =============================================================================
+
+def check_experiment_exists(run_name: str, runs_dir: Path = None) -> bool:
+    """
+    Check if a completed experiment exists with all required files.
+    
+    Returns True if the experiment directory contains:
+    - config.json
+    - history.csv
+    - summary.json
+    - At least one checkpoint (best_head.pt or best_finetune.pt)
+    """
+    runs_dir = runs_dir or RUNS_DIR
+    run_dir = runs_dir / run_name
+    
+    if not run_dir.exists():
+        return False
+    
+    required_files = ["config.json", "history.csv", "summary.json"]
+    for f in required_files:
+        if not (run_dir / f).exists():
+            return False
+    
+    # At least one checkpoint must exist
+    has_checkpoint = (run_dir / "best_head.pt").exists() or (run_dir / "best_finetune.pt").exists()
+    return has_checkpoint
+
+
+def load_experiment_results(run_name: str, runs_dir: Path = None) -> Optional[Dict[str, Any]]:
+    """
+    Load previously saved experiment results (config, history, summary).
+    
+    Returns None if experiment doesn't exist or is incomplete.
+    Returns dict with keys: config, history_df, summary, run_dir
+    """
+    runs_dir = runs_dir or RUNS_DIR
+    run_dir = runs_dir / run_name
+    
+    if not check_experiment_exists(run_name, runs_dir):
+        return None
+    
+    try:
+        config = json.loads((run_dir / "config.json").read_text())
+        history_df = pd.read_csv(run_dir / "history.csv")
+        summary = json.loads((run_dir / "summary.json").read_text())
+        
+        return {
+            "config": config,
+            "history_df": history_df,
+            "summary": summary,
+            "run_dir": run_dir,
+        }
+    except Exception as e:
+        print(f"Warning: Failed to load experiment '{run_name}': {e}")
+        return None
+
+
+def export_experiments_for_github(
+    run_names: List[str],
+    output_dir: Path,
+    runs_dir: Path = None,
+    include_checkpoints: bool = False,
+) -> Dict[str, bool]:
+    """
+    Export experiment results to a directory suitable for GitHub.
+    
+    This exports lightweight files (config, history, summary) that can be
+    committed to GitHub and downloaded in Colab to skip re-training.
+    
+    Args:
+        run_names: List of experiment names to export
+        output_dir: Directory to save exported files
+        runs_dir: Source runs directory (default: RUNS_DIR)
+        include_checkpoints: If True, also copy model checkpoints (large files!)
+    
+    Returns:
+        Dict mapping run_name -> success status
+    """
+    import shutil
+    
+    runs_dir = runs_dir or RUNS_DIR
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    status = {}
+    lightweight_files = ["config.json", "history.csv", "summary.json", 
+                         "test_classification_report.txt", "holdout_classification_report.txt"]
+    checkpoint_files = ["best_head.pt", "best_finetune.pt"]
+    
+    for run_name in run_names:
+        run_dir = runs_dir / run_name
+        out_run_dir = output_dir / run_name
+        
+        if not run_dir.exists():
+            print(f"  Skipping '{run_name}': not found")
+            status[run_name] = False
+            continue
+        
+        out_run_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # Copy lightweight files
+            for f in lightweight_files:
+                src = run_dir / f
+                if src.exists():
+                    shutil.copy2(src, out_run_dir / f)
+            
+            # Optionally copy checkpoints
+            if include_checkpoints:
+                for f in checkpoint_files:
+                    src = run_dir / f
+                    if src.exists():
+                        shutil.copy2(src, out_run_dir / f)
+            
+            status[run_name] = True
+            print(f"  Exported '{run_name}'")
+        except Exception as e:
+            print(f"  Failed '{run_name}': {e}")
+            status[run_name] = False
+    
+    return status
+
+
+def download_experiments_from_github(
+    github_raw_base_url: str,
+    run_names: List[str],
+    runs_dir: Path = None,
+    force: bool = False,
+) -> Dict[str, bool]:
+    """
+    Download experiment results from GitHub raw URLs.
+    
+    This allows resuming experiments in Colab without re-training by
+    downloading previously saved results from GitHub.
+    
+    Args:
+        github_raw_base_url: Base URL for raw GitHub files 
+            (e.g., 'https://raw.githubusercontent.com/user/repo/branch/bird_classifier/runs')
+        run_names: List of experiment names to download
+        runs_dir: Local runs directory (default: RUNS_DIR)
+        force: If True, overwrite existing files
+    
+    Returns:
+        Dict mapping run_name -> success status
+    """
+    import urllib.request
+    import urllib.error
+    
+    runs_dir = runs_dir or RUNS_DIR
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    
+    files_to_download = ["config.json", "history.csv", "summary.json"]
+    status = {}
+    
+    for run_name in run_names:
+        run_dir = runs_dir / run_name
+        
+        # Skip if already exists and not forcing
+        if not force and check_experiment_exists(run_name, runs_dir):
+            print(f"  '{run_name}': already exists (use force=True to overwrite)")
+            status[run_name] = True
+            continue
+        
+        run_dir.mkdir(parents=True, exist_ok=True)
+        success = True
+        
+        for filename in files_to_download:
+            url = f"{github_raw_base_url}/{run_name}/{filename}"
+            dest = run_dir / filename
+            
+            try:
+                urllib.request.urlretrieve(url, str(dest))
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    # File not found - might be optional (like classification reports)
+                    if filename in ["config.json", "history.csv", "summary.json"]:
+                        success = False
+                        print(f"  '{run_name}': missing required file {filename}")
+                else:
+                    success = False
+                    print(f"  '{run_name}': HTTP error downloading {filename}: {e}")
+            except Exception as e:
+                success = False
+                print(f"  '{run_name}': error downloading {filename}: {e}")
+        
+        if success:
+            print(f"  Downloaded '{run_name}'")
+        status[run_name] = success
+    
+    return status
+
+
+def get_completed_experiments(runs_dir: Path = None) -> List[str]:
+    """
+    Get list of all completed experiment names in the runs directory.
+    """
+    runs_dir = runs_dir or RUNS_DIR
+    if not runs_dir.exists():
+        return []
+    
+    completed = []
+    for run_dir in runs_dir.iterdir():
+        if run_dir.is_dir() and check_experiment_exists(run_dir.name, runs_dir):
+            completed.append(run_dir.name)
+    
+    return sorted(completed)
+
+
+def build_results_dataframe(run_names: List[str] = None, runs_dir: Path = None) -> pd.DataFrame:
+    """
+    Build a results DataFrame from saved experiment files.
+    
+    This reconstructs the runner.df() output from saved files, useful when
+    resuming a notebook session.
+    
+    Args:
+        run_names: List of experiment names (default: all completed experiments)
+        runs_dir: Runs directory (default: RUNS_DIR)
+    
+    Returns:
+        DataFrame with experiment results, similar to runner.df()
+    """
+    runs_dir = runs_dir or RUNS_DIR
+    
+    if run_names is None:
+        run_names = get_completed_experiments(runs_dir)
+    
+    rows = []
+    for run_name in run_names:
+        result = load_experiment_results(run_name, runs_dir)
+        if result is None:
+            continue
+        
+        config = result["config"]
+        summary = result["summary"]
+        test = summary.get("test") or {}
+        
+        row = {
+            "run_name": run_name,
+            "preprocess_mode": config.get("preprocess_mode"),
+            "augmentation": config.get("augmentation"),
+            "val_best_f1": summary.get("val_best_f1"),
+            "test_f1": test.get("f1"),
+            "test_precision": test.get("precision"),
+            "test_recall": test.get("recall"),
+            "test_acc": test.get("acc"),
+            "test_top5_acc": test.get("top5_acc"),
+            "test_weighted_f1": test.get("weighted_f1"),
+            "test_weighted_precision": test.get("weighted_precision"),
+            "test_weighted_recall": test.get("weighted_recall"),
+            "run_dir": str(result["run_dir"]),
+        }
+        rows.append(row)
+    
+    if not rows:
+        return pd.DataFrame()
+    
+    return pd.DataFrame(rows).sort_values("val_best_f1", ascending=False)
+
+
+# =============================================================================
 # DATA SPLITTING
 # =============================================================================
 
@@ -1915,10 +2177,15 @@ def train_two_stage(
         test_metrics["weighted_precision"] = float(rep["weighted avg"]["precision"])
         test_metrics["weighted_recall"] = float(rep["weighted avg"]["recall"])
         test_metrics["weighted_f1"] = float(rep["weighted avg"]["f1-score"])
-        print(
-            f"Test (from train split): acc={test_metrics['acc']:.4f}, f1={test_metrics['f1']:.4f}, "
-            f"top5={test_metrics['top5_acc']:.4f}, w_f1={test_metrics['weighted_f1']:.4f}"
-        )
+        print("\n" + "=" * 70)
+        print("TEST SET (15% from train split)")
+        print("=" * 70)
+        print(f"  Accuracy:         {test_metrics['acc']:.4f}")
+        print(f"  Top-5 Accuracy:   {test_metrics['top5_acc']:.4f}")
+        print(f"  Macro Precision:  {test_metrics['precision']:.4f}")
+        print(f"  Macro Recall:     {test_metrics['recall']:.4f}")
+        print(f"  Macro F1:         {test_metrics['f1']:.4f}")
+        print(f"  Weighted F1:      {test_metrics['weighted_f1']:.4f}")
     
     holdout_metrics = None
     holdout_y_true, holdout_y_pred = None, None
@@ -1942,10 +2209,15 @@ def train_two_stage(
         holdout_metrics["weighted_precision"] = float(rep["weighted avg"]["precision"])
         holdout_metrics["weighted_recall"] = float(rep["weighted avg"]["recall"])
         holdout_metrics["weighted_f1"] = float(rep["weighted avg"]["f1-score"])
-        print(
-            f"Holdout (ds_val):        acc={holdout_metrics['acc']:.4f}, f1={holdout_metrics['f1']:.4f}, "
-            f"top5={holdout_metrics['top5_acc']:.4f}, w_f1={holdout_metrics['weighted_f1']:.4f}"
-        )
+        print("\n" + "=" * 70)
+        print("HOLDOUT SET (NABirds validation split)")
+        print("=" * 70)
+        print(f"  Accuracy:         {holdout_metrics['acc']:.4f}")
+        print(f"  Top-5 Accuracy:   {holdout_metrics['top5_acc']:.4f}")
+        print(f"  Macro Precision:  {holdout_metrics['precision']:.4f}")
+        print(f"  Macro Recall:     {holdout_metrics['recall']:.4f}")
+        print(f"  Macro F1:         {holdout_metrics['f1']:.4f}")
+        print(f"  Weighted F1:      {holdout_metrics['weighted_f1']:.4f}")
     
     # Save results
     history_df = pd.DataFrame(history)
@@ -2172,9 +2444,13 @@ def make_experiment_runner(
             "resume_head_ckpt": cfg.resume_head_ckpt,
             "val_best_f1": summary.get("val_best_f1"),
             "test_f1": test.get("f1"),
+            "test_precision": test.get("precision"),
+            "test_recall": test.get("recall"),
             "test_acc": test.get("acc"),
             "test_top5_acc": test.get("top5_acc"),
             "test_weighted_f1": test.get("weighted_f1"),
+            "test_weighted_precision": test.get("weighted_precision"),
+            "test_weighted_recall": test.get("weighted_recall"),
             "run_dir": str(run_dir),
         }
         results.append(row)
@@ -2208,6 +2484,106 @@ def make_experiment_runner(
 
     def reset() -> None:
         results.clear()
+
+    def load_cached(run_name: str, plot: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Load a previously completed experiment from disk and add to results.
+        
+        Returns the result dict if found, None otherwise.
+        Use this to restore experiments from previous sessions.
+        """
+        saved = load_experiment_results(run_name)
+        if saved is None:
+            return None
+        
+        config = saved["config"]
+        summary = saved["summary"]
+        history_df = saved["history_df"]
+        test = summary.get("test") or {}
+        
+        row = {
+            "run_name": run_name,
+            "preprocess_mode": config.get("preprocess_mode"),
+            "augmentation": config.get("augmentation"),
+            "augmentation_params": config.get("augmentation_params"),
+            "resume_head_ckpt": config.get("resume_head_ckpt"),
+            "val_best_f1": summary.get("val_best_f1"),
+            "test_f1": test.get("f1"),
+            "test_precision": test.get("precision"),
+            "test_recall": test.get("recall"),
+            "test_acc": test.get("acc"),
+            "test_top5_acc": test.get("top5_acc"),
+            "test_weighted_f1": test.get("weighted_f1"),
+            "test_weighted_precision": test.get("weighted_precision"),
+            "test_weighted_recall": test.get("weighted_recall"),
+            "run_dir": str(saved["run_dir"]),
+        }
+        results.append(row)
+        
+        if plot:
+            plot_training_history(history_df, run_name=run_name)
+        
+        print(f"  Loaded cached experiment: {run_name} (val_f1={summary.get('val_best_f1', 0):.4f})")
+        return row
+
+    def run_or_load(
+        run_name: str,
+        *,
+        plot: bool = True,
+        evaluate_test: bool = True,
+        force_retrain: bool = False,
+        **cfg_overrides,
+    ):
+        """
+        Run experiment OR load from cache if already completed.
+        
+        This is the recommended method for resumable experiments:
+        - Checks if experiment already exists on disk
+        - If exists: loads results and skips training
+        - If not exists: runs training normally
+        
+        Args:
+            run_name: Experiment name
+            plot: Whether to show plots
+            evaluate_test: Whether to evaluate on test set
+            force_retrain: If True, always retrain even if cached
+            **cfg_overrides: Training config overrides
+        
+        Returns:
+            Same as run(): (row, history_df, summary, run_dir)
+        """
+        if not force_retrain and check_experiment_exists(run_name):
+            # Load from cache
+            row = load_cached(run_name, plot=plot)
+            if row is not None:
+                saved = load_experiment_results(run_name)
+                return row, saved["history_df"], saved["summary"], saved["run_dir"]
+        
+        # Run training
+        return run(run_name, plot=plot, evaluate_test=evaluate_test, **cfg_overrides)
+
+    def load_all_cached(run_names: List[str] = None, plot: bool = False) -> int:
+        """
+        Load multiple cached experiments at once.
+        
+        Args:
+            run_names: List of experiment names to load. If None, loads all
+                       completed experiments found in RUNS_DIR.
+            plot: Whether to show plots for each loaded experiment
+        
+        Returns:
+            Number of experiments successfully loaded
+        """
+        if run_names is None:
+            run_names = get_completed_experiments()
+        
+        loaded = 0
+        for name in run_names:
+            if load_cached(name, plot=plot) is not None:
+                loaded += 1
+        
+        return loaded
+
     def final_holdout(
         run_name: str,
         *,
@@ -2273,9 +2649,12 @@ def make_experiment_runner(
 
     return SimpleNamespace(
         run=run,
+        run_or_load=run_or_load,
         run_many=run_many,
         df=df,
         reset=reset,
+        load_cached=load_cached,
+        load_all_cached=load_all_cached,
         final_holdout=final_holdout,
         results=results,
     )
