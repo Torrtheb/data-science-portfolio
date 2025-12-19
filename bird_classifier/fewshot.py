@@ -2270,6 +2270,10 @@ class FewShotExperiment:
         max_iterations: int = 30,
         min_improvement: float = 0.0,
         mode: str = "batch",
+        max_batch_attempts: int = 8,
+        candidate_pool_per_class: int = 50,
+        max_rejected_batches: int = 50,
+        seed: int = 42,
         max_total_candidates: int = 500,
         confidence_threshold: float = 0.05,
         max_per_class: int = 5,
@@ -2294,6 +2298,10 @@ class FewShotExperiment:
             max_iterations: Maximum greedy iterations (batch mode) or passes over candidate list (sample mode).
             min_improvement: Required minimum increase in val accuracy to accept an addition.
             mode: 'batch' or 'sample'.
+            max_batch_attempts: In batch mode, how many alternative batches to try per iteration before giving up.
+            candidate_pool_per_class: In batch mode, consider only the top-N candidates per predicted class when sampling batches.
+            max_rejected_batches: In batch mode, stop after this many rejected batches total.
+            seed: RNG seed for batch sampling.
             max_total_candidates: In sample mode, maximum total candidates to consider.
             confidence_threshold: Softmax probability gate (secondary in many-class problems).
             max_per_class: Max additions per class per iteration (batch) or cap per class in candidate generation (sample).
@@ -2324,60 +2332,122 @@ class FewShotExperiment:
             print(f"Start | Val acc: {acc()*100:.2f}% | Support: {self.get_support_count()} | Pool: {self.get_pool_count()}")
 
         if mode == "batch":
+            rng = np.random.default_rng(int(seed))
+            rejected_batches = 0
             for it in range(1, int(max_iterations) + 1):
                 if self.get_pool_count() == 0:
                     break
-
                 before_acc = acc()
-                state = self.save_state()
 
-                stats = self.run_iteration(
-                    confidence_threshold=confidence_threshold,
-                    max_per_class=max_per_class,
-                    use_true_labels=use_true_labels,
+                # Build candidate pool once per iteration (then try alternative batches from it)
+                high_conf = self.get_high_confidence_predictions(
+                    threshold=confidence_threshold,
+                    max_per_class=None,  # we enforce max_per_class during sampling
                     margin_threshold=margin_threshold,
                     sim_threshold=sim_threshold,
                     sim_margin_threshold=sim_margin_threshold,
                     mutual_nn_k=mutual_nn_k,
                 )
-
-                # No additions => stop
-                if int(stats.get("n_added", 0)) == 0:
+                if not high_conf:
                     if verbose:
-                        print(f"Iter {it:02d}: no samples added; stopping.")
+                        print(f"Iter {it:02d}: no candidates; stopping.")
                     break
 
-                after_acc = acc()
-                if after_acc >= before_acc + float(min_improvement):
-                    accepted.append(
-                        {
-                            "iteration": it,
-                            "n_added": int(stats.get("n_added", 0)),
-                            "val_before": float(before_acc),
-                            "val_after": float(after_acc),
-                        }
-                    )
-                    if verbose:
-                        print(
-                            f"Iter {it:02d}: ACCEPT (+{(after_acc-before_acc)*100:.2f}%) "
-                            f"added={stats.get('n_added', 0)} | Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
+                # Cap pool per class to keep sampling stable/fast
+                by_class: Dict[int, List[Dict[str, Any]]] = {}
+                for cid, items in high_conf.items():
+                    by_class[int(cid)] = items[: int(max(1, candidate_pool_per_class))]
+
+                accepted_this_iter = False
+                for attempt in range(1, int(max_batch_attempts) + 1):
+                    if rejected_batches >= int(max_rejected_batches):
+                        if verbose:
+                            print(f"Stopping: reached max_rejected_batches={max_rejected_batches}.")
+                        break
+
+                    # Snapshot before trying a candidate batch
+                    state = self.save_state()
+
+                    # Attempt schedule:
+                    # - attempt 1: deterministically take top candidates (most reliable)
+                    # - later: try random subsets and/or smaller batch sizes
+                    shrink = 1.0 if attempt == 1 else max(0.25, 1.0 - 0.15 * (attempt - 1))
+                    per_class_k = max(1, int(round(int(max_per_class) * shrink)))
+
+                    n_added = 0
+                    added_by_class: Dict[int, List[int]] = {}
+
+                    for cid, items in by_class.items():
+                        # filter out items already in support (paranoia)
+                        support_set = set(int(x) for x in self.support_indices.get(int(cid), []))
+                        candidates = [it for it in items if int(it["idx"]) not in support_set]
+                        if not candidates:
+                            continue
+
+                        k = min(per_class_k, len(candidates))
+                        if attempt == 1:
+                            chosen = candidates[:k]
+                        else:
+                            # sample without replacement from top pool
+                            pos = rng.choice(len(candidates), size=k, replace=False)
+                            chosen = [candidates[int(p)] for p in pos]
+
+                        idxs = [int(c["idx"]) for c in chosen]
+                        if not idxs:
+                            continue
+                        added_by_class[int(cid)] = idxs
+                        self.add_to_support(idxs, int(cid))
+                        n_added += len(idxs)
+
+                    if n_added == 0:
+                        self.restore_state(state)
+                        if verbose:
+                            print(f"Iter {it:02d} attempt {attempt:02d}: no additions; stopping.")
+                        accepted_this_iter = False
+                        break
+
+                    after_acc = acc()
+                    if after_acc >= before_acc + float(min_improvement):
+                        accepted.append(
+                            {
+                                "iteration": it,
+                                "attempt": attempt,
+                                "n_added": int(n_added),
+                                "val_before": float(before_acc),
+                                "val_after": float(after_acc),
+                                "per_class_k": int(per_class_k),
+                            }
                         )
-                else:
+                        if verbose:
+                            print(
+                                f"Iter {it:02d} attempt {attempt:02d}: ACCEPT (+{(after_acc-before_acc)*100:.2f}%) "
+                                f"added={n_added} (per_class_k={per_class_k}) | Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
+                            )
+                        accepted_this_iter = True
+                        break
+
+                    # Reject and rollback, then try a different batch
                     self.restore_state(state)
+                    rejected_batches += 1
                     rejected.append(
                         {
                             "iteration": it,
-                            "n_added": int(stats.get("n_added", 0)),
+                            "attempt": attempt,
+                            "n_added": int(n_added),
                             "val_before": float(before_acc),
                             "val_after": float(after_acc),
+                            "per_class_k": int(per_class_k),
                         }
                     )
                     if verbose:
                         print(
-                            f"Iter {it:02d}: REJECT (val decreased) "
-                            f"added={stats.get('n_added', 0)} | Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
+                            f"Iter {it:02d} attempt {attempt:02d}: REJECT "
+                            f"added={n_added} (per_class_k={per_class_k}) | Val {before_acc*100:.2f}%→{after_acc*100:.2f}%"
                         )
-                        print("Stopping (strict mode).")
+
+                if not accepted_this_iter:
+                    if verbose:
+                        print(f"Iter {it:02d}: no improving batch found after {max_batch_attempts} attempts; stopping.")
                     break
 
         else:
