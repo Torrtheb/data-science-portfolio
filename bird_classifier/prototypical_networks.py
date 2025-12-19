@@ -37,21 +37,29 @@ class LearnedProjectionHead(nn.Module):
     - It doesn't know what distinguishes a Carolina Wren from a House Wren
     - This projection learns bird-specific feature relationships
     
+    IMPORTANT: For 555 fine-grained classes, we use a LARGER output dimension
+    to preserve discriminative information.
+    
     Architecture: input_dim → hidden_dim → output_dim (L2 normalized)
     """
     def __init__(
         self, 
         input_dim: int = 1792, 
-        hidden_dim: int = 512, 
-        output_dim: int = 128, 
-        dropout: float = 0.3
+        hidden_dim: int = 1024,  # Larger hidden layer
+        output_dim: int = 512,   # LARGER output to preserve info for 555 classes
+        dropout: float = 0.1     # Less dropout to preserve information
     ):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         
+        # Wider network with residual-style connection
         self.projection = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),  # Extra layer
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
@@ -106,32 +114,37 @@ def prototypical_loss(
     query_embeddings: torch.Tensor,
     query_labels: torch.Tensor,
     prototypes: torch.Tensor,
-    temperature: float = 1.0
+    temperature: float = 0.1,  # Lower temperature for sharper predictions
+    use_cosine: bool = True    # Use cosine similarity instead of Euclidean
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Compute Prototypical Networks loss.
     
     For each query sample:
-    1. Compute distance to all prototypes
-    2. Convert distances to probabilities (softmax over negative distances)
+    1. Compute similarity/distance to all prototypes
+    2. Convert to probabilities (softmax)
     3. Cross-entropy loss against true label
     
     Args:
-        query_embeddings: [N_query, D] query sample embeddings
+        query_embeddings: [N_query, D] query sample embeddings (L2 normalized)
         query_labels: [N_query] ground truth labels (0 to n_classes-1)
-        prototypes: [n_classes, D] class prototypes
+        prototypes: [n_classes, D] class prototypes (L2 normalized)
         temperature: Softmax temperature (lower = sharper predictions)
+        use_cosine: If True, use cosine similarity; else Euclidean distance
     
     Returns:
         loss: Scalar loss value
         accuracy: Classification accuracy on queries
     """
-    # Compute squared Euclidean distances: ||q - p||^2
-    # Shape: [N_query, n_classes]
-    dists = torch.cdist(query_embeddings, prototypes, p=2)
-    
-    # Convert to log-probabilities (softmax over negative distances)
-    log_probs = F.log_softmax(-dists / temperature, dim=1)
+    if use_cosine:
+        # Cosine similarity (embeddings are already L2 normalized)
+        # Shape: [N_query, n_classes]
+        similarities = torch.mm(query_embeddings, prototypes.t())
+        log_probs = F.log_softmax(similarities / temperature, dim=1)
+    else:
+        # Euclidean distance
+        dists = torch.cdist(query_embeddings, prototypes, p=2)
+        log_probs = F.log_softmax(-dists / temperature, dim=1)
     
     # Cross-entropy loss
     loss = F.nll_loss(log_probs, query_labels)
@@ -284,21 +297,30 @@ class PrototypicalNetwork(nn.Module):
     
     Training:
         Episodic training with support/query splits per episode
+        
+    Key design choices for 555 fine-grained classes:
+        - Larger embedding_dim (512) to preserve discriminative info
+        - Deeper network (3 layers) for better feature learning
+        - Lower dropout to preserve information
     """
     def __init__(
         self,
         input_dim: int = 1792,
-        hidden_dim: int = 512,
-        embedding_dim: int = 128,
-        dropout: float = 0.3
+        hidden_dim: int = 1024,   # Larger hidden layer
+        embedding_dim: int = 512,  # Much larger output for 555 classes
+        dropout: float = 0.1       # Less dropout
     ):
         super().__init__()
         
         self.embedding_dim = embedding_dim
         
-        # Learnable projection head
+        # Deeper projection head with residual-style architecture
         self.projection = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),  # Additional layer
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
@@ -439,14 +461,15 @@ def train_projection_head_episodic(
         # Forward pass
         optimizer.zero_grad()
         
-        # Project embeddings
+        # Project embeddings (already L2 normalized from model)
         support_proj = model(support_emb)
         query_proj = model(query_emb)
         
-        # Compute prototypes
+        # Compute prototypes and normalize them
         prototypes = compute_prototypes(support_proj, support_labels_t, n_way)
+        prototypes = F.normalize(prototypes, p=2, dim=1)  # L2 normalize prototypes
         
-        # Compute loss
+        # Compute loss (using cosine similarity)
         loss, acc = prototypical_loss(query_proj, query_labels_t, prototypes)
         
         # Backward pass
@@ -545,6 +568,8 @@ def evaluate_protonet(
     with torch.no_grad():
         support_proj = model(support_embs)
         prototypes = compute_prototypes(support_proj, support_labels, len(unique_classes))
+        # L2 normalize prototypes for cosine similarity
+        prototypes = F.normalize(prototypes, p=2, dim=1)
         
         # Process validation in batches
         val_embs = torch.from_numpy(val_embeddings).float()
@@ -553,9 +578,10 @@ def evaluate_protonet(
         
         for i in range(0, len(val_embs), batch_size):
             batch = val_embs[i:i+batch_size].to(device)
-            batch_proj = model(batch)
-            dists = torch.cdist(batch_proj, prototypes, p=2)
-            preds = dists.argmin(dim=1).cpu().numpy()
+            batch_proj = model(batch)  # Already L2 normalized from model
+            # Use cosine similarity (dot product of normalized vectors)
+            similarities = torch.mm(batch_proj, prototypes.t())
+            preds = similarities.argmax(dim=1).cpu().numpy()
             all_preds.extend(preds)
     
     # Convert predictions back to original class IDs
@@ -665,8 +691,8 @@ def run_prototypical_network_experiment(
     n_way: int = 30,
     k_shot: int = 5,
     n_query: int = 10,
-    lr: float = 1e-3,
-    embedding_dim: int = 128,
+    lr: float = 5e-4,            # Lower learning rate for stability
+    embedding_dim: int = 512,    # Larger output for 555 classes
     seed: int = 42
 ) -> Dict:
     """
@@ -764,12 +790,14 @@ def run_prototypical_network_experiment(
     print(f"  Episodes: {n_episodes}")
     print(f"  Episode config: {n_way}-way {k_shot}-shot {n_query}-query")
     print(f"  Learning rate: {lr}")
+    print(f"  Embedding dimension: {embedding_dim}")
+    print(f"  Distance metric: Cosine similarity")
     
     model = PrototypicalNetwork(
         input_dim=train_embeddings.shape[1],
-        hidden_dim=512,
+        hidden_dim=1024,         # Larger hidden layer
         embedding_dim=embedding_dim,
-        dropout=0.3
+        dropout=0.1              # Less dropout
     )
     
     history = train_projection_head_episodic(
@@ -831,7 +859,7 @@ def quick_validation_test(
     val_indices: Dict[int, np.ndarray],
     device: torch.device,
     batch_size: int = 64,
-    n_episodes: int = 500,
+    n_episodes: int = 1000,  # More episodes for reliable results
     seed: int = 42
 ) -> Dict:
     """
@@ -839,10 +867,21 @@ def quick_validation_test(
     
     This is a faster version with fewer episodes to quickly validate
     the hypothesis before committing to full training.
+    
+    Key improvements over initial version:
+    - Larger embedding_dim (512) to handle 555 fine-grained classes
+    - More episodes (1000) for better convergence
+    - Uses cosine similarity instead of Euclidean distance
     """
     print("=" * 70)
-    print("QUICK VALIDATION: Testing learned projection head")
+    print("QUICK VALIDATION: Testing learned projection head (improved)")
     print("=" * 70)
+    print()
+    print("Key settings:")
+    print("  - Embedding dimension: 512 (larger for fine-grained classes)")
+    print("  - Distance metric: Cosine similarity")
+    print("  - Training episodes: 1000")
+    print()
     
     return run_prototypical_network_experiment(
         extractor=extractor,
@@ -852,12 +891,12 @@ def quick_validation_test(
         val_indices=val_indices,
         device=device,
         batch_size=batch_size,
-        n_episodes=n_episodes,  # Fewer episodes for quick test
-        n_way=20,  # Smaller episodes for faster iteration
+        n_episodes=n_episodes,
+        n_way=30,  # More classes per episode
         k_shot=5,
         n_query=5,
-        lr=1e-3,
-        embedding_dim=128,
+        lr=5e-4,  # Slightly lower learning rate
+        embedding_dim=512,  # Much larger output dimension
         seed=seed
     )
 
