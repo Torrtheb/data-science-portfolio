@@ -1495,6 +1495,9 @@ class FewShotExperiment:
         self.n_support = n_support
         self.batch_size = batch_size
         self.use_fp16_embeddings = use_fp16_embeddings
+        self.prototype_method: str = "mean"  # mean | trimmed_mean | weighted
+        self.prototype_trim_k: int = 1
+        self.prototype_weight_power: float = 2.0
 
         self.seed = seed
         # Use provided cache_dir or default to data/embedding_cache
@@ -1540,6 +1543,32 @@ class FewShotExperiment:
         # Initial prototype computation (uses cached embeddings)
         self.prototypes, self.class_ids = self._compute_prototypes_from_cache()
         self.class_id_to_idx = {cid: i for i, cid in enumerate(self.class_ids)}
+
+    def set_prototype_builder(
+        self,
+        method: str = "mean",
+        *,
+        trim_k: int = 1,
+        weight_power: float = 2.0,
+        recompute: bool = True,
+    ) -> None:
+        """Configure how class prototypes are computed from support embeddings.
+
+        Args:
+            method: One of {'mean','trimmed_mean','weighted'}.
+            trim_k: For trimmed methods, number of lowest-similarity support samples to drop per class.
+            weight_power: For weighted prototypes, weights are max(sim_to_centroid,0)**weight_power.
+            recompute: If True, recompute prototypes immediately.
+        """
+        method = str(method)
+        if method not in {"mean", "trimmed_mean", "weighted"}:
+            raise ValueError("method must be one of: 'mean', 'trimmed_mean', 'weighted'")
+        self.prototype_method = method
+        self.prototype_trim_k = max(0, int(trim_k))
+        self.prototype_weight_power = float(weight_power)
+        if recompute:
+            self.prototypes, self.class_ids = self._compute_prototypes_from_cache()
+            self.class_id_to_idx = {cid: i for i, cid in enumerate(self.class_ids)}
         
         # Compute initial per-class accuracy on VALIDATION split (not final test)
         self._update_per_class_stats()
@@ -1757,10 +1786,49 @@ class FewShotExperiment:
                 continue
             
             embeddings = self._train_embeddings[indices]
-            prototype = embeddings.mean(axis=0)
+            prototype = self._compute_prototype_from_embeddings(embeddings)
             prototypes.append(prototype)
         
         return np.array(prototypes), np.array(class_ids)
+
+    def _compute_prototype_from_embeddings(self, embeddings: np.ndarray) -> np.ndarray:
+        """Compute a class prototype from its support embeddings using the configured method."""
+        if embeddings.ndim != 2:
+            raise ValueError("embeddings must have shape (N, D)")
+
+        n = int(embeddings.shape[0])
+        if n == 0:
+            return np.zeros(self.extractor.embedding_dim, dtype=embeddings.dtype)
+        if n == 1 or self.prototype_method == "mean":
+            return embeddings.mean(axis=0)
+
+        # Use cosine similarity to an initial centroid to detect outliers/inliers.
+        centroid = embeddings.mean(axis=0)
+        centroid_norm = centroid / (np.linalg.norm(centroid) + 1e-8)
+        emb_norm = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
+        sims = emb_norm @ centroid_norm  # (N,)
+
+        trim_k = min(self.prototype_trim_k, max(0, n - 1))
+        if self.prototype_method == "trimmed_mean":
+            if trim_k > 0 and n > trim_k:
+                keep = np.argsort(sims)[trim_k:]
+                return embeddings[keep].mean(axis=0)
+            return embeddings.mean(axis=0)
+
+        if self.prototype_method == "weighted":
+            if trim_k > 0 and n > trim_k:
+                keep = np.argsort(sims)[trim_k:]
+                embeddings = embeddings[keep]
+                sims = sims[keep]
+                n = int(embeddings.shape[0])
+            weights = np.maximum(sims, 0.0) ** float(self.prototype_weight_power)
+            if float(weights.sum()) <= 1e-12:
+                return embeddings.mean(axis=0)
+            weights = weights / (weights.sum() + 1e-8)
+            return (embeddings * weights.reshape(n, 1)).sum(axis=0)
+
+        # Should never happen due to validation in set_prototype_builder
+        return embeddings.mean(axis=0)
     
     def _update_per_class_stats(self, results: Optional[Dict] = None):
         """Update per-class accuracy statistics on validation set.
@@ -2555,6 +2623,12 @@ class FewShotExperiment:
         margin_threshold: Optional[float] = None,
         min_margin_threshold: float = 0.0,
         margin_decay: float = 0.0,
+        sim_threshold: Optional[float] = None,
+        min_sim_threshold: float = -1.0,
+        sim_decay: float = 0.0,
+        sim_margin_threshold: Optional[float] = None,
+        min_sim_margin_threshold: float = 0.0,
+        sim_margin_decay: float = 0.0,
         mutual_nn_k: Optional[int] = None,
         max_iterations: int = 50,
         max_per_class: int = 5,
@@ -2574,6 +2648,12 @@ class FewShotExperiment:
             margin_threshold: Optional minimum probability margin p(top1)-p(top2) for acceptance.
             min_margin_threshold: Minimum margin threshold if margin_decay is used.
             margin_decay: Amount to reduce margin threshold when stuck (0 disables margin decay).
+            sim_threshold: Optional minimum cosine similarity to predicted prototype for acceptance.
+            min_sim_threshold: Minimum similarity threshold if sim_decay is used.
+            sim_decay: Amount to reduce sim_threshold when stuck (0 disables sim decay).
+            sim_margin_threshold: Optional minimum similarity gap (sim_top1 - sim_top2) for acceptance.
+            min_sim_margin_threshold: Minimum sim margin threshold if sim_margin_decay is used.
+            sim_margin_decay: Amount to reduce sim_margin_threshold when stuck (0 disables sim margin decay).
             mutual_nn_k: Optional K for mutual nearest-neighbor filter.
             max_iterations: Maximum iterations to run.
             max_per_class: Maximum samples to add per class per iteration.
@@ -2592,6 +2672,10 @@ class FewShotExperiment:
         print(f"Min threshold: {min_threshold}")
         if margin_threshold is not None:
             print(f"Margin threshold: {float(margin_threshold):.3f} (min {float(min_margin_threshold):.3f}, decay {float(margin_decay):.3f})")
+        if sim_threshold is not None:
+            print(f"Sim threshold: {float(sim_threshold):.3f} (min {float(min_sim_threshold):.3f}, decay {float(sim_decay):.3f})")
+        if sim_margin_threshold is not None:
+            print(f"Sim margin: {float(sim_margin_threshold):.3f} (min {float(min_sim_margin_threshold):.3f}, decay {float(sim_margin_decay):.3f})")
         if mutual_nn_k is not None:
             print(f"Mutual-NN K: {int(mutual_nn_k)}")
         print(f"Max iterations: {max_iterations}")
@@ -2601,6 +2685,8 @@ class FewShotExperiment:
 
         current_threshold = float(initial_threshold)
         current_margin = float(margin_threshold) if margin_threshold is not None else None
+        current_sim = float(sim_threshold) if sim_threshold is not None else None
+        current_sim_margin = float(sim_margin_threshold) if sim_margin_threshold is not None else None
         iterations_without_candidates = 0
 
         # Get initial metrics
@@ -2635,6 +2721,8 @@ class FewShotExperiment:
                 use_true_labels=use_true_labels,
                 margin_threshold=current_margin,
                 mutual_nn_k=mutual_nn_k,
+                sim_threshold=current_sim,
+                sim_margin_threshold=current_sim_margin,
             )
 
             current_accuracy = float(stats.get('accuracy_after', stats.get('val_accuracy', 0.0)))
@@ -2649,6 +2737,10 @@ class FewShotExperiment:
                 )
                 if current_margin is not None:
                     msg += f"Margin: {current_margin:.3f} | "
+                if current_sim is not None:
+                    msg += f"Sim: {current_sim:.3f} | "
+                if current_sim_margin is not None:
+                    msg += f"SimΔ: {current_sim_margin:.3f} | "
                 msg += (
                     f"Added: {stats['n_added']:3d} | "
                     f"Acc: {current_accuracy*100:.2f}% | "
@@ -2668,6 +2760,12 @@ class FewShotExperiment:
                 elif current_margin is not None and float(margin_decay) > 0 and current_margin > float(min_margin_threshold):
                     current_margin = max(float(min_margin_threshold), current_margin - float(margin_decay))
                     print(f"   → Lowering margin to {current_margin:.3f}")
+                elif current_sim is not None and float(sim_decay) > 0 and current_sim > float(min_sim_threshold):
+                    current_sim = max(float(min_sim_threshold), current_sim - float(sim_decay))
+                    print(f"   → Lowering sim threshold to {current_sim:.3f}")
+                elif current_sim_margin is not None and float(sim_margin_decay) > 0 and current_sim_margin > float(min_sim_margin_threshold):
+                    current_sim_margin = max(float(min_sim_margin_threshold), current_sim_margin - float(sim_margin_decay))
+                    print(f"   → Lowering sim margin to {current_sim_margin:.3f}")
                 else:
                     print(f"   → At minimum threshold, no more candidates")
                     if iterations_without_candidates >= 3:
