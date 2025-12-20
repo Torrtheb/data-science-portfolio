@@ -232,9 +232,17 @@ def train_supervised_projection(
         
         # Validation - use original labels for prototype evaluation
         if val_embeddings is not None and (epoch + 1) % 5 == 0:
+            # Debug on first validation only
+            debug_this = (epoch + 1) == 5
+            if debug_this:
+                print(f"\n=== VALIDATION DEBUG (epoch {epoch+1}) ===")
+                print(f"train_labels_original sample: {train_labels_original[:10]}")
+                print(f"train_labels (mapped) sample: {train_labels[:10]}")
+                print(f"val_labels sample: {val_labels[:10]}")
             val_acc = evaluate_with_prototypes(
                 model, train_embeddings, train_labels_original,
-                val_embeddings, val_labels, device
+                val_embeddings, val_labels, device,
+                debug=debug_this
             )
             history['val_acc'].append(val_acc)
             
@@ -268,7 +276,8 @@ def evaluate_with_prototypes(
     val_embeddings: np.ndarray,
     val_labels: np.ndarray,
     device: torch.device,
-    return_predictions: bool = False
+    return_predictions: bool = False,
+    debug: bool = False
 ) -> float:
     """
     Evaluate using prototype-based classification with learned embeddings.
@@ -280,12 +289,20 @@ def evaluate_with_prototypes(
     
     Args:
         return_predictions: If True, returns (accuracy, predictions) tuple
+        debug: If True, print debug information
     """
     model.eval()
     
     unique_classes = np.unique(train_labels)
     n_classes = len(unique_classes)
     class_to_idx = {c: i for i, c in enumerate(unique_classes)}
+    
+    if debug:
+        print(f"DEBUG evaluate_with_prototypes:")
+        print(f"  train_labels sample: {train_labels[:10]}")
+        print(f"  val_labels sample: {val_labels[:10]}")
+        print(f"  unique_classes sample: {unique_classes[:10]}")
+        print(f"  n_classes: {n_classes}")
     
     with torch.no_grad():
         # Project training embeddings and compute prototypes
@@ -321,6 +338,12 @@ def evaluate_with_prototypes(
     pred_labels = np.array([idx_to_class[p] for p in all_preds])
     
     accuracy = (pred_labels == val_labels).mean()
+    
+    if debug:
+        print(f"  pred_labels sample: {pred_labels[:10]}")
+        print(f"  val_labels sample: {val_labels[:10]}")
+        print(f"  matches: {(pred_labels[:10] == val_labels[:10])}")
+        print(f"  accuracy: {accuracy}")
     
     model.train()
     
