@@ -1639,10 +1639,10 @@ class FewShotExperiment:
         if projection_model is not None:
             projection_model.to(self._projection_device)
             projection_model.eval()
-            print(f"✅ Projection head set: {projection_model.__class__.__name__}")
+            print(f"Projection head set: {projection_model.__class__.__name__}")
             print(f"   Device: {self._projection_device}")
         else:
-            print("🔄 Projection head removed, using raw embeddings")
+            print("Projection head removed, using raw embeddings")
         
         if recompute:
             self.prototypes, self.class_ids = self._compute_prototypes_from_cache()
