@@ -1145,15 +1145,26 @@ def make_dataloader(
     batch_size: int,
     shuffle: bool = False,
     sampler: Optional[WeightedRandomSampler] = None,
+    num_workers: int = 0,
 ) -> DataLoader:
-    """Create a DataLoader with appropriate settings."""
+    """Create a DataLoader with appropriate settings.
+    
+    Args:
+        dataset: PyTorch Dataset
+        batch_size: Batch size
+        shuffle: Whether to shuffle (ignored if sampler is provided)
+        sampler: Optional weighted sampler
+        num_workers: Number of worker processes. Use 0 for DeepLake without caching,
+                     or 4 when using cached PNG files for ~3x speedup.
+    """
     return DataLoader(
         dataset,
         batch_size=max(1, int(batch_size)),
         shuffle=(shuffle if sampler is None else False),
         sampler=sampler,
-        num_workers=0,  # Required for DeepLake
+        num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=(num_workers > 0),  # Keep workers alive between batches
     )
 
 
@@ -1958,10 +1969,12 @@ def train_two_stage(
     )
     
     # Create dataloaders
+    # Use num_workers=4 when caching is enabled (cached PNGs don't need DeepLake)
+    num_workers = 4 if cache_dir is not None else 0
     sampler = make_weighted_sampler(splits.train_y) if cfg.use_weighted_sampler else None
-    train_loader = make_dataloader(train_ds, cfg.batch_size, shuffle=True, sampler=sampler)
-    val_loader = make_dataloader(val_ds, cfg.batch_size, shuffle=False)
-    test_loader = make_dataloader(test_ds, cfg.batch_size, shuffle=False)
+    train_loader = make_dataloader(train_ds, cfg.batch_size, shuffle=True, sampler=sampler, num_workers=num_workers)
+    val_loader = make_dataloader(val_ds, cfg.batch_size, shuffle=False, num_workers=num_workers)
+    test_loader = make_dataloader(test_ds, cfg.batch_size, shuffle=False, num_workers=num_workers)
     
     holdout_loader = None
     if evaluate_holdout:
@@ -1986,7 +1999,7 @@ def train_two_stage(
             cache_dir=cache_dir,
             cache_version=cfg.cache_version,
         )
-        holdout_loader = make_dataloader(holdout_ds, cfg.batch_size, shuffle=False)
+        holdout_loader = make_dataloader(holdout_ds, cfg.batch_size, shuffle=False, num_workers=num_workers)
     
     # Loss function
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)

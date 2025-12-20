@@ -157,6 +157,9 @@ def train_supervised_projection(
         train_labels_original: Original class IDs for prototype evaluation
     """
     model = model.to(device)
+    train_labels_original = np.asarray(train_labels_original, dtype=np.int64).reshape(-1)
+    if val_labels is not None:
+        val_labels = np.asarray(val_labels, dtype=np.int64).reshape(-1)
     
     # Create dataset
     train_dataset = TensorDataset(
@@ -294,8 +297,8 @@ def evaluate_with_prototypes(
     model.eval()
     
     # Ensure consistent int type for label comparisons
-    train_labels = np.array(train_labels, dtype=np.int64)
-    val_labels = np.array(val_labels, dtype=np.int64)
+    train_labels = np.asarray(train_labels, dtype=np.int64).reshape(-1)
+    val_labels = np.asarray(val_labels, dtype=np.int64).reshape(-1)
     
     unique_classes = np.unique(train_labels)
     n_classes = len(unique_classes)
