@@ -33,6 +33,7 @@ import numpy as np
 from tqdm.auto import tqdm
 from typing import Dict, List, Tuple, Optional
 import matplotlib.pyplot as plt
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 
 class ProjectionHead(nn.Module):
@@ -261,7 +262,8 @@ def evaluate_with_prototypes(
     train_labels: np.ndarray,
     val_embeddings: np.ndarray,
     val_labels: np.ndarray,
-    device: torch.device
+    device: torch.device,
+    return_predictions: bool = False
 ) -> float:
     """
     Evaluate using prototype-based classification with learned embeddings.
@@ -270,6 +272,9 @@ def evaluate_with_prototypes(
     2. Compute prototype (mean) for each class
     3. Project validation embeddings
     4. Classify by nearest prototype (cosine similarity)
+    
+    Args:
+        return_predictions: If True, returns (accuracy, predictions) tuple
     """
     model.eval()
     
@@ -313,6 +318,9 @@ def evaluate_with_prototypes(
     accuracy = (pred_labels == val_labels).mean()
     
     model.train()
+    
+    if return_predictions:
+        return accuracy, pred_labels
     return accuracy
 
 
@@ -470,17 +478,24 @@ def run_learned_projection_experiment(
     # Step 5: Final evaluation
     print("\n[5/5] Final evaluation...")
     
-    final_acc = evaluate_with_prototypes(
+    final_acc, pred_labels = evaluate_with_prototypes(
         model, train_embeddings, train_labels,
-        val_embeddings, val_labels, device
+        val_embeddings, val_labels, device,
+        return_predictions=True
     )
     
+    # Compute precision, recall, F1 (macro average for multi-class)
+    val_precision = precision_score(val_labels, pred_labels, average='macro', zero_division=0)
+    val_recall = recall_score(val_labels, pred_labels, average='macro', zero_division=0)
+    val_f1 = f1_score(val_labels, pred_labels, average='macro', zero_division=0)
+    
     print(f"\n{'='*70}")
-    print("RESULTS SUMMARY (Validation Set)")
+    print("VALIDATION SET RESULTS (Learned Projection)")
     print(f"{'='*70}")
-    print(f"  Frozen baseline (val):        {frozen_acc*100:.2f}%")
-    print(f"  Learned projection (val):     {final_acc*100:.2f}%")
-    print(f"  Improvement:                  {(final_acc - frozen_acc)*100:+.2f}%")
+    print(f"  Validation Accuracy:          {final_acc*100:.2f}%")
+    print(f"  Validation Precision (macro): {val_precision*100:.2f}%")
+    print(f"  Validation Recall (macro):    {val_recall*100:.2f}%")
+    print(f"  Validation F1 Score (macro):  {val_f1*100:.2f}%")
     print(f"{'='*70}")
     
     # Plot training curves
@@ -494,10 +509,9 @@ def run_learned_projection_experiment(
     
     axes[1].plot(history['epoch'], [a*100 for a in history['train_acc']], 'b-', alpha=0.7, label='Training Accuracy')
     if history['val_acc']:
-        val_epochs = [e for e in history['epoch'] if (e+1) % 5 == 0][:len(history['val_acc'])]
+        # Validation is computed every 5 epochs (at epochs 5, 10, 15, ...)
+        val_epochs = list(range(5, n_epochs + 1, 5))[:len(history['val_acc'])]
         axes[1].plot(val_epochs, [a*100 for a in history['val_acc']], 'ro-', label='Validation Accuracy')
-    axes[1].axhline(y=frozen_acc*100, color='gray', linestyle='--', alpha=0.7, label='Frozen baseline (val)')
-    axes[1].axhline(y=70, color='green', linestyle='--', alpha=0.7, label='Target (70%)')
     axes[1].set_xlabel('Epoch')
     axes[1].set_ylabel('Accuracy (%)')
     axes[1].set_title('Training vs Validation Accuracy')
@@ -511,6 +525,10 @@ def run_learned_projection_experiment(
         'frozen_accuracy': frozen_acc,
         'learned_accuracy': final_acc,
         'improvement': final_acc - frozen_acc,
+        'val_accuracy': final_acc,
+        'val_precision': val_precision,
+        'val_recall': val_recall,
+        'val_f1': val_f1,
         'history': history,
         'model': model
     }
