@@ -740,14 +740,13 @@ def run_prototypical_network_experiment(
     extractor,
     ds_train,
     support_indices: Dict[int, np.ndarray],
-    pool_indices: Dict[int, np.ndarray],
     val_indices: Dict[int, np.ndarray],
     device: torch.device,
     batch_size: int = 64,
     n_episodes: int = 3000,
     n_way: int = 30,
-    k_shot: int = 5,
-    n_query: int = 10,
+    k_shot: int = 3,             # 3-shot for episodes (leaving 2 for query)
+    n_query: int = 2,            # 2 query samples per class per episode
     lr: float = 5e-4,            # Lower learning rate for stability
     embedding_dim: int = 512,    # Larger output for 555 classes
     min_samples_per_class: Optional[int] = None,  # None = k_shot + n_query (minimum needed)
@@ -755,10 +754,13 @@ def run_prototypical_network_experiment(
     seed: int = 42
 ) -> Dict:
     """
-    Run complete Prototypical Network experiment.
+    Run complete Prototypical Network experiment using ONLY support set.
+    
+    This complies with the 5-shot constraint: only the 5 labeled samples
+    per class are used for training the projection head.
     
     Steps:
-    1. Extract embeddings for support + pool + validation data
+    1. Extract embeddings for support + validation data
     2. Evaluate frozen baseline
     3. Train Prototypical Network with episodic training
     4. Evaluate trained model
@@ -766,15 +768,14 @@ def run_prototypical_network_experiment(
     Args:
         extractor: Feature extractor with extract_from_dataset method
         ds_train: DeepLake training dataset
-        support_indices: Dict mapping class_id -> support sample indices
-        pool_indices: Dict mapping class_id -> pool sample indices
+        support_indices: Dict mapping class_id -> support sample indices (5 per class)
         val_indices: Dict mapping class_id -> validation sample indices
         device: PyTorch device
         batch_size: Batch size for embedding extraction
         n_episodes: Number of training episodes
         n_way: Classes per episode
-        k_shot: Support samples per class per episode
-        n_query: Query samples per class per episode
+        k_shot: Support samples per class per episode (max 5)
+        n_query: Query samples per class per episode (must be <= available samples)
         lr: Learning rate
         embedding_dim: Output embedding dimension
         min_samples_per_class: Min samples needed per class
@@ -793,12 +794,10 @@ def run_prototypical_network_experiment(
     # Step 1: Prepare data indices
     print("\n[1/5] Preparing data...")
     
-    # Combine support and pool for training (we'll use episodic sampling)
+    # Use ONLY support indices for training (5-shot constraint)
     train_indices_dict = {}
-    for cid in set(support_indices.keys()) | set(pool_indices.keys()):
-        support = list(support_indices.get(cid, []))
-        pool = list(pool_indices.get(cid, []))
-        train_indices_dict[cid] = np.array(support + pool, dtype=np.int64)
+    for cid, indices in support_indices.items():
+        train_indices_dict[cid] = np.array(indices, dtype=np.int64)
     
     # Flatten indices
     train_flat = flatten_indices(train_indices_dict)
@@ -924,7 +923,6 @@ def quick_validation_test(
     extractor,
     ds_train,
     support_indices: Dict[int, np.ndarray],
-    pool_indices: Dict[int, np.ndarray],
     val_indices: Dict[int, np.ndarray],
     device: torch.device,
     batch_size: int = 64,
@@ -935,13 +933,15 @@ def quick_validation_test(
     """
     Quick validation experiment to test if learned embeddings help.
     
+    Uses ONLY the 5-shot support set for training (no pool data).
+    
     This is a faster version with fewer episodes to quickly validate
     the hypothesis before committing to full training.
     
     Key settings:
     - Larger embedding_dim (512) to handle 555 fine-grained classes
     - More episodes (1000) for better convergence
-    - Euclidean distance by default (original ProtoNet paper)
+    - Only 5 samples per class (support set only)
     
     Args:
         use_cosine: If True, use cosine similarity instead of Euclidean distance
@@ -949,10 +949,11 @@ def quick_validation_test(
     metric_str = "Cosine similarity" if use_cosine else "Euclidean distance"
     
     print("=" * 70)
-    print("QUICK VALIDATION: Testing learned projection head")
+    print("QUICK VALIDATION: Testing learned projection head (5-shot only)")
     print("=" * 70)
     print()
     print("Key settings:")
+    print(f"  - Training data: Support set only (5 samples per class)")
     print(f"  - Embedding dimension: 512 (larger for fine-grained classes)")
     print(f"  - Distance metric: {metric_str}")
     print(f"  - Training episodes: {n_episodes}")
@@ -962,14 +963,13 @@ def quick_validation_test(
         extractor=extractor,
         ds_train=ds_train,
         support_indices=support_indices,
-        pool_indices=pool_indices,
         val_indices=val_indices,
         device=device,
         batch_size=batch_size,
         n_episodes=n_episodes,
         n_way=30,  # More classes per episode
-        k_shot=5,
-        n_query=5,
+        k_shot=3,  # 3 support + 2 query = 5 total (all we have)
+        n_query=2,
         lr=5e-4,  # Slightly lower learning rate
         embedding_dim=512,  # Much larger output dimension
         use_cosine=use_cosine,
@@ -983,7 +983,7 @@ if __name__ == "__main__":
     print("  from prototypical_networks import quick_validation_test, run_prototypical_network_experiment")
     print("  ")
     print("  # Quick test (5-10 minutes)")
-    print("  results = quick_validation_test(extractor, ds_train, support_indices, pool_indices, val_indices_split, DEVICE)")
+    print("  results = quick_validation_test(extractor, ds_train, support_indices, val_indices_split, DEVICE)")
     print("  ")
     print("  # Full training (30-60 minutes)")
-    print("  results = run_prototypical_network_experiment(extractor, ds_train, support_indices, pool_indices, val_indices_split, DEVICE, n_episodes=3000)")
+    print("  results = run_prototypical_network_experiment(extractor, ds_train, support_indices, val_indices_split, DEVICE, n_episodes=3000)")
