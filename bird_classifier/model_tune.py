@@ -2384,6 +2384,7 @@ def make_experiment_runner(
     splits,
     ds_holdout=None,
     holdout_label_index: Optional[Dict[int, np.ndarray]] = None,
+    output_dir: Path = None,
 ):
     """Create a tiny runner so you can launch experiments with 1 line.
 
@@ -2391,7 +2392,15 @@ def make_experiment_runner(
       - Uses the SAME `splits` for every run (fair comparisons).
       - Uses ONLY internal val/test from `ds_train` during experiments.
       - Holdout (`ds_val`) is only used when you explicitly call `final_holdout(...)`.
+    
+    Args:
+        output_dir: Directory for saving experiment results. Defaults to RUNS_DIR.
+                    Pass a Google Drive path in Colab for persistence.
     """
+    # Use provided output_dir or fall back to default RUNS_DIR
+    runs_dir = output_dir if output_dir is not None else RUNS_DIR
+    runs_dir = Path(runs_dir)
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     results: List[Dict[str, Any]] = []
 
@@ -2417,6 +2426,7 @@ def make_experiment_runner(
             splits=splits,
             evaluate_test=evaluate_test,
             evaluate_holdout=False,
+            output_dir=runs_dir,
         )
 
         if plot:
@@ -2492,7 +2502,7 @@ def make_experiment_runner(
         Returns the result dict if found, None otherwise.
         Use this to restore experiments from previous sessions.
         """
-        saved = load_experiment_results(run_name)
+        saved = load_experiment_results(run_name, runs_dir=runs_dir)
         if saved is None:
             return None
         
@@ -2552,11 +2562,11 @@ def make_experiment_runner(
         Returns:
             Same as run(): (row, history_df, summary, run_dir)
         """
-        if not force_retrain and check_experiment_exists(run_name):
+        if not force_retrain and check_experiment_exists(run_name, runs_dir=runs_dir):
             # Load from cache
             row = load_cached(run_name, plot=plot)
             if row is not None:
-                saved = load_experiment_results(run_name)
+                saved = load_experiment_results(run_name, runs_dir=runs_dir)
                 return row, saved["history_df"], saved["summary"], saved["run_dir"]
         
         # Run training
@@ -2568,14 +2578,14 @@ def make_experiment_runner(
         
         Args:
             run_names: List of experiment names to load. If None, loads all
-                       completed experiments found in RUNS_DIR.
+                       completed experiments found in runs_dir.
             plot: Whether to show plots for each loaded experiment
         
         Returns:
             Number of experiments successfully loaded
         """
         if run_names is None:
-            run_names = get_completed_experiments()
+            run_names = get_completed_experiments(runs_dir=runs_dir)
         
         loaded = 0
         for name in run_names:
@@ -2624,6 +2634,7 @@ def make_experiment_runner(
             splits=splits,
             evaluate_test=True,
             evaluate_holdout=True,
+            output_dir=runs_dir,
         )
 
         if plot:
@@ -2657,4 +2668,5 @@ def make_experiment_runner(
         load_all_cached=load_all_cached,
         final_holdout=final_holdout,
         results=results,
+        runs_dir=runs_dir,
     )
