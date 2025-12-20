@@ -1,14 +1,46 @@
 """
 Prototypical Networks for Few-Shot Bird Classification
+=======================================================
 
-This module implements Prototypical Networks (Snell et al., 2017) for the NABirds
-dataset. It includes:
-1. Quick validation experiment with learned projection head
-2. Full episodic training with Prototypical Networks
-3. Evaluation utilities
+This module implements Prototypical Networks (Snell et al., 2017) for fine-grained
+bird species classification on the NABirds dataset (555 classes).
 
-Reference: https://arxiv.org/abs/1703.05175
-Tutorial inspiration: https://github.com/sicara/easy-few-shot-learning
+Overview
+--------
+Prototypical Networks learn a metric space where classification is performed by
+computing distances to class prototypes (mean embeddings of support samples).
+This approach is particularly effective for few-shot learning scenarios where
+only a small number of labeled samples are available per class.
+
+Key Components
+--------------
+1. LearnedProjectionHead: Residual MLP that refines frozen backbone embeddings
+2. EpisodeSampler: Samples N-way K-shot episodes for meta-learning
+3. PrototypicalNetwork: Main model with episodic training support
+4. train_projection_head_episodic: Training loop with validation monitoring
+5. evaluate_protonet: Full 555-way evaluation on validation set
+
+Mathematical Foundation
+-----------------------
+For each class c, the prototype p_c is the mean of embedded support samples:
+
+    p_c = (1/|S_c|) * Σ f_φ(x_i) for (x_i, y_i) in S_c
+
+Classification uses softmax over negative Euclidean distances:
+
+    P(y=c|x) = exp(-d(f_φ(x), p_c)) / Σ_c' exp(-d(f_φ(x), p_c'))
+
+Few-Shot Compliance
+-------------------
+IMPORTANT: This implementation uses ONLY the support set (5 samples/class) for
+training. Pool/unlabeled data is never used as training labels. This strictly
+adheres to the few-shot learning paradigm.
+
+References
+----------
+- Snell, J., Swersky, K., & Zemel, R. (2017). Prototypical Networks for 
+  Few-shot Learning. NeurIPS. https://arxiv.org/abs/1703.05175
+- Tutorial inspiration: https://github.com/sicara/easy-few-shot-learning
 """
 
 import torch

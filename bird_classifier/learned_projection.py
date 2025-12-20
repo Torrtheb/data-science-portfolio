@@ -1,19 +1,28 @@
 """
 Learned Projection for Few-Shot Bird Classification
+====================================================
 
 This module implements a SUPERVISED approach to learning better embeddings
-for the NABirds dataset. Unlike episodic meta-learning (which doesn't work
-well for this problem), we train directly on all 555 classes.
+for the NABirds dataset. Unlike episodic meta-learning, we train directly 
+on all 555 classes using standard cross-entropy loss.
 
-The approach:
-1. Train a projection head with standard cross-entropy on support samples
+The Approach
+------------
+1. Train a projection head with cross-entropy on support samples
 2. Use the learned projection for prototype-based classification
-3. The learned embeddings preserve global class structure
+3. Evaluate on a held-out validation set (never used for training)
 
-Why this works better than episodic training:
-- Episodic training (30-way) doesn't generalize to 555-way evaluation
-- Supervised training directly optimizes for the 555-class problem
-- We keep the global discriminative structure while adding task-specific learning
+Key Insight
+-----------
+Unlike episodic training (30-way) which may not generalize to 555-way 
+evaluation, supervised training directly optimizes for the full 555-class 
+problem while keeping the global discriminative structure.
+
+Few-Shot Compliance
+-------------------
+- Training uses ONLY the support set (5 samples/class)
+- Validation accuracy is computed on a held-out set
+- Pool data is never used as training labels
 """
 
 import torch
@@ -229,8 +238,8 @@ def train_supervised_projection(
             
             pbar.set_postfix({
                 'loss': f'{train_loss:.4f}',
-                'train_acc': f'{train_acc*100:.1f}%',
-                'val_acc': f'{val_acc*100:.1f}%'
+                'train': f'{train_acc*100:.1f}%',
+                'val': f'{val_acc*100:.1f}%'
             })
         else:
             pbar.set_postfix({
@@ -241,7 +250,7 @@ def train_supervised_projection(
     # Restore best model
     if best_state is not None:
         model.load_state_dict(best_state)
-        print(f"\nRestored best model with val_acc = {best_val_acc*100:.2f}%")
+        print(f"\nRestored best model with validation accuracy = {best_val_acc*100:.2f}%")
     
     return history
 
@@ -467,10 +476,10 @@ def run_learned_projection_experiment(
     )
     
     print(f"\n{'='*70}")
-    print("RESULTS SUMMARY")
+    print("RESULTS SUMMARY (Validation Set)")
     print(f"{'='*70}")
-    print(f"  Frozen baseline accuracy:     {frozen_acc*100:.2f}%")
-    print(f"  Learned projection accuracy:  {final_acc*100:.2f}%")
+    print(f"  Frozen baseline (val):        {frozen_acc*100:.2f}%")
+    print(f"  Learned projection (val):     {final_acc*100:.2f}%")
     print(f"  Improvement:                  {(final_acc - frozen_acc)*100:+.2f}%")
     print(f"{'='*70}")
     
@@ -483,16 +492,16 @@ def run_learned_projection_experiment(
     axes[0].set_title('Training Loss')
     axes[0].grid(True, alpha=0.3)
     
-    axes[1].plot(history['epoch'], [a*100 for a in history['train_acc']], label='Train')
+    axes[1].plot(history['epoch'], [a*100 for a in history['train_acc']], 'b-', alpha=0.7, label='Training Accuracy')
     if history['val_acc']:
         val_epochs = [e for e in history['epoch'] if (e+1) % 5 == 0][:len(history['val_acc'])]
-        axes[1].plot(val_epochs, [a*100 for a in history['val_acc']], 'o-', label='Val (prototype)')
-    axes[1].axhline(y=frozen_acc*100, color='gray', linestyle='--', label='Frozen baseline')
-    axes[1].axhline(y=70, color='green', linestyle='--', label='Target')
+        axes[1].plot(val_epochs, [a*100 for a in history['val_acc']], 'ro-', label='Validation Accuracy')
+    axes[1].axhline(y=frozen_acc*100, color='gray', linestyle='--', alpha=0.7, label='Frozen baseline (val)')
+    axes[1].axhline(y=70, color='green', linestyle='--', alpha=0.7, label='Target (70%)')
     axes[1].set_xlabel('Epoch')
     axes[1].set_ylabel('Accuracy (%)')
-    axes[1].set_title('Accuracy')
-    axes[1].legend()
+    axes[1].set_title('Training vs Validation Accuracy')
+    axes[1].legend(loc='lower right')
     axes[1].grid(True, alpha=0.3)
     
     plt.tight_layout()
