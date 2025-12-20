@@ -135,6 +135,7 @@ def train_supervised_projection(
     model: SupervisedProjectionClassifier,
     train_embeddings: np.ndarray,
     train_labels: np.ndarray,
+    train_labels_original: np.ndarray,
     val_embeddings: Optional[np.ndarray],
     val_labels: Optional[np.ndarray],
     device: torch.device,
@@ -150,6 +151,10 @@ def train_supervised_projection(
     
     This is standard supervised training on the support set, which
     teaches the projection to be discriminative for all 555 classes.
+    
+    Args:
+        train_labels: Mapped labels (0 to N-1) for cross-entropy training
+        train_labels_original: Original class IDs for prototype evaluation
     """
     model = model.to(device)
     
@@ -225,10 +230,10 @@ def train_supervised_projection(
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
         
-        # Validation
+        # Validation - use original labels for prototype evaluation
         if val_embeddings is not None and (epoch + 1) % 5 == 0:
             val_acc = evaluate_with_prototypes(
-                model, train_embeddings, train_labels,
+                model, train_embeddings, train_labels_original,
                 val_embeddings, val_labels, device
             )
             history['val_acc'].append(val_acc)
@@ -465,7 +470,8 @@ def run_learned_projection_experiment(
     history = train_supervised_projection(
         model=model,
         train_embeddings=train_embeddings,
-        train_labels=train_labels_mapped,  # Use mapped labels
+        train_labels=train_labels_mapped,  # Use mapped labels for cross-entropy
+        train_labels_original=train_labels,  # Use original labels for prototype eval
         val_embeddings=val_embeddings,
         val_labels=val_labels,  # Keep original for prototype eval
         device=device,
