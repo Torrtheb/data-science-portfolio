@@ -1663,7 +1663,12 @@ class FewShotExperiment:
         # Convert to tensor, project, convert back
         with torch.no_grad():
             emb_tensor = torch.from_numpy(embeddings).float().to(self._projection_device)
-            projected = self._projection_model(emb_tensor)
+            # Use get_embedding() if available (e.g., SupervisedProjectionClassifier)
+            # Otherwise fall back to forward() (e.g., ProjectionHead or PrototypicalNetwork)
+            if hasattr(self._projection_model, 'get_embedding'):
+                projected = self._projection_model.get_embedding(emb_tensor)
+            else:
+                projected = self._projection_model(emb_tensor)
             return projected.cpu().numpy()
     
     def _get_projected_train_embeddings(self) -> np.ndarray:
