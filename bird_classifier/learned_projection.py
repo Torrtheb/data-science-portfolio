@@ -293,55 +293,77 @@ def evaluate_with_prototypes(
     """
     model.eval()
     
+    # Ensure consistent int type for label comparisons
+    train_labels = np.array(train_labels, dtype=np.int64)
+    val_labels = np.array(val_labels, dtype=np.int64)
+    
     unique_classes = np.unique(train_labels)
     n_classes = len(unique_classes)
-    class_to_idx = {c: i for i, c in enumerate(unique_classes)}
+    class_to_idx = {int(c): i for i, c in enumerate(unique_classes)}
     
     if debug:
         print(f"DEBUG evaluate_with_prototypes:")
-        print(f"  train_labels sample: {train_labels[:10]}")
-        print(f"  val_labels sample: {val_labels[:10]}")
+        print(f"  train_labels dtype: {train_labels.dtype}, sample: {train_labels[:10]}")
+        print(f"  val_labels dtype: {val_labels.dtype}, sample: {val_labels[:10]}")
         print(f"  unique_classes sample: {unique_classes[:10]}")
         print(f"  n_classes: {n_classes}")
+        # Check if val_labels are all in unique_classes
+        val_in_train = np.isin(val_labels, unique_classes)
+        print(f"  val_labels in train classes: {val_in_train.sum()}/{len(val_labels)} ({val_in_train.mean()*100:.1f}%)")
     
     with torch.no_grad():
         # Project training embeddings and compute prototypes
         train_emb_t = torch.from_numpy(train_embeddings).float().to(device)
         train_proj = model.get_embedding(train_emb_t)
         
+        if debug:
+            print(f"  train_proj shape: {train_proj.shape}, has_nan: {torch.isnan(train_proj).any()}, norm range: [{train_proj.norm(dim=1).min():.4f}, {train_proj.norm(dim=1).max():.4f}]")
+        
         # Compute prototypes
         prototypes = torch.zeros(n_classes, train_proj.shape[1], device=device)
         counts = torch.zeros(n_classes, device=device)
         
         for i, label in enumerate(train_labels):
-            idx = class_to_idx[label]
+            idx = class_to_idx[int(label)]
             prototypes[idx] += train_proj[i]
             counts[idx] += 1
         
         prototypes = prototypes / counts.unsqueeze(1).clamp(min=1)
         prototypes = F.normalize(prototypes, p=2, dim=1)
         
+        if debug:
+            print(f"  prototypes shape: {prototypes.shape}, has_nan: {torch.isnan(prototypes).any()}")
+            print(f"  counts range: [{counts.min():.0f}, {counts.max():.0f}]")
+        
         # Project and classify validation
         val_emb_t = torch.from_numpy(val_embeddings).float()
         batch_size = 256
         all_preds = []
+        first_batch_debug = True
         
         for i in range(0, len(val_emb_t), batch_size):
             batch = val_emb_t[i:i+batch_size].to(device)
             batch_proj = model.get_embedding(batch)
             similarities = torch.mm(batch_proj, prototypes.t())
             preds = similarities.argmax(dim=1).cpu().numpy()
+            
+            if debug and first_batch_debug:
+                print(f"  First batch similarities shape: {similarities.shape}")
+                print(f"  First batch similarities range: [{similarities.min():.4f}, {similarities.max():.4f}]")
+                print(f"  First batch preds (indices): {preds[:10]}")
+                first_batch_debug = False
+            
             all_preds.extend(preds)
     
-    # Convert back to original labels
+    # Convert back to original labels (ensure int64 dtype for comparison)
     idx_to_class = {i: c for c, i in class_to_idx.items()}
-    pred_labels = np.array([idx_to_class[p] for p in all_preds])
+    pred_labels = np.array([idx_to_class[int(p)] for p in all_preds], dtype=np.int64)
     
     accuracy = (pred_labels == val_labels).mean()
     
     if debug:
-        print(f"  pred_labels sample: {pred_labels[:10]}")
-        print(f"  val_labels sample: {val_labels[:10]}")
+        print(f"  pred_labels dtype: {pred_labels.dtype}, sample: {pred_labels[:10]}")
+        print(f"  val_labels dtype: {val_labels.dtype}, sample: {val_labels[:10]}")
         print(f"  matches: {(pred_labels[:10] == val_labels[:10])}")
         print(f"  accuracy: {accuracy}")
     
@@ -361,16 +383,20 @@ def evaluate_frozen_baseline(
     """
     Evaluate baseline with frozen embeddings (no learned projection).
     """
+    # Ensure consistent int type for label comparisons
+    train_labels = np.array(train_labels, dtype=np.int64)
+    val_labels = np.array(val_labels, dtype=np.int64)
+    
     unique_classes = np.unique(train_labels)
     n_classes = len(unique_classes)
-    class_to_idx = {c: i for i, c in enumerate(unique_classes)}
+    class_to_idx = {int(c): i for i, c in enumerate(unique_classes)}
     
     # Compute prototypes
     prototypes = np.zeros((n_classes, train_embeddings.shape[1]))
     counts = np.zeros(n_classes)
     
     for i, label in enumerate(train_labels):
-        idx = class_to_idx[label]
+        idx = class_to_idx[int(label)]
         prototypes[idx] += train_embeddings[i]
         counts[idx] += 1
     
@@ -385,7 +411,7 @@ def evaluate_frozen_baseline(
     pred_indices = similarities.argmax(axis=1)
     
     idx_to_class = {i: c for c, i in class_to_idx.items()}
-    pred_labels = np.array([idx_to_class[p] for p in pred_indices])
+    pred_labels = np.array([idx_to_class[int(p)] for p in pred_indices], dtype=np.int64)
     
     return (pred_labels == val_labels).mean()
 
