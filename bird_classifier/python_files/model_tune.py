@@ -2915,6 +2915,24 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
         markersize=5,
         linewidth=2,
     )
+    ax.plot(
+        epochs,
+        history_df["val_precision"],
+        label="Val Precision",
+        color="#2ecc71",
+        marker="^",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_recall"],
+        label="Val Recall",
+        color="#9b59b6",
+        marker="d",
+        markersize=5,
+        linewidth=2,
+    )
     ax.axvline(
         x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
     )
@@ -2929,7 +2947,7 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     best_epoch = history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"]
     best_f1 = history_df["val_f1"].max()
     #ax.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
-    ax.scatter([best_epoch], [best_f1], color="#9b59b6", s=100, zorder=5, marker="*")
+    #ax.scatter([best_epoch], [best_f1], color="#9b59b6", s=100, zorder=5, marker="*")
 
     # Main title
     title = "Training History"
