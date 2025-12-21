@@ -923,7 +923,7 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
                 scale=(1 - scale_limit, 1 + scale_limit) if scale_limit > 0 else None,
                 rotate=(-rotate_limit, rotate_limit) if rotate_limit > 0 else None,
                 shear=None,
-                mode=cv2.BORDER_REFLECT_101,
+                border_mode=cv2.BORDER_REFLECT_101,
                 p=min(max(p_affine, 0.0), 1.0),
             )
         )
