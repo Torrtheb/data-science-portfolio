@@ -1582,6 +1582,8 @@ def train_one_epoch(
     use_amp: bool = True,
     grad_clip_norm: float = 1.0,
     freeze_bn: bool = True,
+    scheduler=None,
+    scheduler_step_per_batch: bool = False,
 ) -> Dict[str, float]:
     """Train model for one epoch.
 
@@ -1594,6 +1596,8 @@ def train_one_epoch(
         use_amp: Whether to use automatic mixed precision. Defaults to True.
         grad_clip_norm: Maximum gradient norm for clipping. Defaults to 1.0.
         freeze_bn: Whether to keep BatchNorm in eval mode. Defaults to True.
+        scheduler: Optional learning rate scheduler.
+        scheduler_step_per_batch: If True, step scheduler after each batch (for OneCycleLR).
 
     Returns:
         Dict with 'loss', 'acc', 'precision', 'recall', and 'f1' metrics.
@@ -1661,6 +1665,10 @@ def train_one_epoch(
         n += bs
         y_true.extend(y.cpu().tolist())
         y_pred.extend(logits.argmax(dim=1).cpu().tolist())
+
+        # Step scheduler per-batch (for OneCycleLR)
+        if scheduler is not None and scheduler_step_per_batch:
+            scheduler.step()
 
         pbar.set_postfix(loss=total_loss / n)
 
@@ -2659,6 +2667,9 @@ def train_two_stage(
         for ep in epoch_pbar:
             t0 = time.time()
 
+            # Determine if scheduler should step per-batch (OneCycleLR) or per-epoch
+            step_per_batch = scheduler is not None and cfg.scheduler == "onecycle"
+
             # Train
             train_metrics = train_one_epoch(
                 model,
@@ -2669,11 +2680,12 @@ def train_two_stage(
                 use_amp=cfg.use_amp,
                 grad_clip_norm=cfg.grad_clip_norm,
                 freeze_bn=freeze_bn,
+                scheduler=scheduler if step_per_batch else None,
+                scheduler_step_per_batch=step_per_batch,
             )
 
-            # Step scheduler (per-epoch schedulers like CosineAnnealingLR)
-            # OneCycleLR is per-batch, but we handle it per-epoch here for simplicity
-            if scheduler is not None:
+            # Step scheduler per-epoch (CosineAnnealingLR, etc.)
+            if scheduler is not None and not step_per_batch:
                 scheduler.step()
 
             # Validate
