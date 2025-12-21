@@ -37,17 +37,27 @@ import albumentations as A
 
 import deeplake
 
+# Type aliases for clarity
+DeepLakeDataset = deeplake.Dataset
+EfficientNetWeights = models.EfficientNet_B4_Weights
+
 # =============================================================================
 # MODULE-LEVEL CONSTANTS
 # =============================================================================
 
+
 def get_device() -> torch.device:
-    """Pick the best available device (CUDA → MPS → CPU)."""
+    """Pick the best available device (CUDA → MPS → CPU).
+
+    Returns:
+        torch.device: The best available compute device.
+    """
     if torch.cuda.is_available():
         return torch.device("cuda")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
 
 DEVICE = get_device()
 RUNS_DIR = Path("runs")
@@ -80,8 +90,13 @@ BASELINE_CONFIG = dict(
     seed=42,
 )
 
+
 def seed_everything(seed: int) -> None:
-    """Set all random seeds for reproducibility."""
+    """Set all random seeds for reproducibility.
+
+    Args:
+        seed: Random seed value to use across all libraries.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -91,18 +106,23 @@ def seed_everything(seed: int) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
 # =============================================================================
 # LABEL INDEX UTILITIES
 # =============================================================================
 
-def build_label_index(ds) -> Dict[int, np.ndarray]:
-    """
-    Build a mapping: class_label → array of dataset indices.
-    
-    Why this is useful:
-    - Enables stratified splitting (same proportion of each class)
-    - Required for few-shot sampling (N images per class)
-    - Faster than iterating through dataset multiple times
+
+def build_label_index(ds: DeepLakeDataset) -> Dict[int, np.ndarray]:
+    """Build a mapping from class labels to dataset indices.
+
+    Enables stratified splitting (same proportion of each class),
+    few-shot sampling (N images per class), and faster iteration.
+
+    Args:
+        ds: DeepLake dataset containing 'labels' tensor.
+
+    Returns:
+        Dict mapping class_label (int) to array of dataset indices.
     """
     label_to_idxs: Dict[int, list] = defaultdict(list)
     for i, sample in tqdm(enumerate(ds), total=len(ds), desc="Building label index"):
@@ -112,12 +132,24 @@ def build_label_index(ds) -> Dict[int, np.ndarray]:
 
 
 def save_label_index(label_index: Dict[int, np.ndarray], path) -> None:
-    """Save label index to compressed numpy file."""
+    """Save label index to compressed numpy file.
+
+    Args:
+        label_index: Dict mapping class labels to index arrays.
+        path: File path for the output .npz file.
+    """
     np.savez_compressed(path, **{str(k): v for k, v in label_index.items()})
 
 
 def load_label_index(path) -> Dict[int, np.ndarray]:
-    """Load label index from numpy file."""
+    """Load label index from numpy file.
+
+    Args:
+        path: Path to the .npz file containing the label index.
+
+    Returns:
+        Dict mapping class labels (int) to arrays of dataset indices.
+    """
     data = np.load(path)
     return {int(k): data[k] for k in data.files}
 
@@ -126,50 +158,60 @@ def load_label_index(path) -> Dict[int, np.ndarray]:
 # EXPERIMENT PERSISTENCE (for resuming across Colab sessions)
 # =============================================================================
 
+
 def check_experiment_exists(run_name: str, runs_dir: Path = None) -> bool:
-    """
-    Check if a completed experiment exists with all required files.
-    
-    Returns True if the experiment directory contains:
-    - config.json
-    - history.csv
-    - summary.json
-    - At least one checkpoint (best_head.pt or best_finetune.pt)
+    """Check if a completed experiment exists with all required files.
+
+    Args:
+        run_name: Name of the experiment to check.
+        runs_dir: Directory containing experiment runs. Defaults to RUNS_DIR.
+
+    Returns:
+        True if the experiment directory contains config.json, history.csv,
+        summary.json, and at least one checkpoint file.
     """
     runs_dir = runs_dir or RUNS_DIR
     run_dir = runs_dir / run_name
-    
+
     if not run_dir.exists():
         return False
-    
+
     required_files = ["config.json", "history.csv", "summary.json"]
     for f in required_files:
         if not (run_dir / f).exists():
             return False
-    
+
     # At least one checkpoint must exist
-    has_checkpoint = (run_dir / "best_head.pt").exists() or (run_dir / "best_finetune.pt").exists()
+    has_checkpoint = (run_dir / "best_head.pt").exists() or (
+        run_dir / "best_finetune.pt"
+    ).exists()
     return has_checkpoint
 
 
-def load_experiment_results(run_name: str, runs_dir: Path = None) -> Optional[Dict[str, Any]]:
-    """
-    Load previously saved experiment results (config, history, summary).
-    
-    Returns None if experiment doesn't exist or is incomplete.
-    Returns dict with keys: config, history_df, summary, run_dir
+def load_experiment_results(
+    run_name: str, runs_dir: Path = None
+) -> Optional[Dict[str, Any]]:
+    """Load previously saved experiment results.
+
+    Args:
+        run_name: Name of the experiment to load.
+        runs_dir: Directory containing experiment runs. Defaults to RUNS_DIR.
+
+    Returns:
+        Dict with keys 'config', 'history_df', 'summary', 'run_dir',
+        or None if experiment doesn't exist or is incomplete.
     """
     runs_dir = runs_dir or RUNS_DIR
     run_dir = runs_dir / run_name
-    
+
     if not check_experiment_exists(run_name, runs_dir):
         return None
-    
+
     try:
         config = json.loads((run_dir / "config.json").read_text())
         history_df = pd.read_csv(run_dir / "history.csv")
         summary = json.loads((run_dir / "summary.json").read_text())
-        
+
         return {
             "config": config,
             "history_df": history_df,
@@ -189,107 +231,119 @@ def export_experiments_for_github(
 ) -> Dict[str, bool]:
     """
     Export experiment results to a directory suitable for GitHub.
-    
+
     This exports lightweight files (config, history, summary) that can be
     committed to GitHub and downloaded in Colab to skip re-training.
-    
+
     Args:
         run_names: List of experiment names to export
         output_dir: Directory to save exported files
         runs_dir: Source runs directory (default: RUNS_DIR)
         include_checkpoints: If True, also copy model checkpoints (large files!)
-    
+
     Returns:
         Dict mapping run_name -> success status
     """
     runs_dir = runs_dir or RUNS_DIR
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     status = {}
-    lightweight_files = ["config.json", "history.csv", "summary.json", 
-                         "test_classification_report.txt", "holdout_classification_report.txt"]
+    lightweight_files = [
+        "config.json",
+        "history.csv",
+        "summary.json",
+        "test_classification_report.txt",
+        "holdout_classification_report.txt",
+    ]
     checkpoint_files = ["best_head.pt", "best_finetune.pt"]
-    
+
     for run_name in run_names:
         run_dir = runs_dir / run_name
         out_run_dir = output_dir / run_name
-        
+
         if not run_dir.exists():
             print(f"  Skipping '{run_name}': not found")
             status[run_name] = False
             continue
-        
+
         out_run_dir.mkdir(parents=True, exist_ok=True)
-        
+
         try:
             # Copy lightweight files
             for f in lightweight_files:
                 src = run_dir / f
                 if src.exists():
                     shutil.copy2(src, out_run_dir / f)
-            
+
             # Optionally copy checkpoints
             if include_checkpoints:
                 for f in checkpoint_files:
                     src = run_dir / f
                     if src.exists():
                         shutil.copy2(src, out_run_dir / f)
-            
+
             status[run_name] = True
             print(f"  Exported '{run_name}'")
         except Exception as e:
             print(f"  Failed '{run_name}': {e}")
             status[run_name] = False
-    
+
     return status
 
 
 def get_completed_experiments(runs_dir: Path = None) -> List[str]:
-    """
-    Get list of all completed experiment names in the runs directory.
+    """Get list of all completed experiment names in the runs directory.
+
+    Args:
+        runs_dir: Directory containing experiment runs. Defaults to RUNS_DIR.
+
+    Returns:
+        Sorted list of experiment names that have all required files.
     """
     runs_dir = runs_dir or RUNS_DIR
     if not runs_dir.exists():
         return []
-    
+
     completed = []
     for run_dir in runs_dir.iterdir():
         if run_dir.is_dir() and check_experiment_exists(run_dir.name, runs_dir):
             completed.append(run_dir.name)
-    
+
     return sorted(completed)
 
 
-def build_results_dataframe(run_names: List[str] = None, runs_dir: Path = None) -> pd.DataFrame:
+def build_results_dataframe(
+    run_names: List[str] = None, runs_dir: Path = None
+) -> pd.DataFrame:
     """
     Build a results DataFrame from saved experiment files.
-    
+
     This reconstructs the runner.df() output from saved files, useful when
     resuming a notebook session.
-    
+
     Args:
         run_names: List of experiment names (default: all completed experiments)
         runs_dir: Runs directory (default: RUNS_DIR)
-    
+
     Returns:
         DataFrame with experiment results, similar to runner.df()
     """
     runs_dir = runs_dir or RUNS_DIR
-    
+
     if run_names is None:
         run_names = get_completed_experiments(runs_dir)
-    
+
     rows = []
     for run_name in run_names:
         result = load_experiment_results(run_name, runs_dir)
         if result is None:
             continue
-        
+
         config = result["config"]
         summary = result["summary"]
         test = summary.get("test") or {}
-        
+
         row = {
             "run_name": run_name,
             "preprocess_mode": config.get("preprocess_mode"),
@@ -306,10 +360,10 @@ def build_results_dataframe(run_names: List[str] = None, runs_dir: Path = None) 
             "run_dir": str(result["run_dir"]),
         }
         rows.append(row)
-    
+
     if not rows:
         return pd.DataFrame()
-    
+
     return pd.DataFrame(rows).sort_values("val_best_f1", ascending=False)
 
 
@@ -317,30 +371,43 @@ def build_results_dataframe(run_names: List[str] = None, runs_dir: Path = None) 
 # DATA SPLITTING
 # =============================================================================
 
+
 @dataclass(frozen=True)
 class SplitIndices:
     """Container for train/val/test split indices and labels."""
+
     train_idx: np.ndarray
     train_y: np.ndarray
     val_idx: np.ndarray
     val_y: np.ndarray
     test_idx: np.ndarray
     test_y: np.ndarray
-    
+
     def __repr__(self):
-        return (f"SplitIndices(train={len(self.train_idx)}, "
-                f"val={len(self.val_idx)}, test={len(self.test_idx)})")
+        return (
+            f"SplitIndices(train={len(self.train_idx)}, "
+            f"val={len(self.val_idx)}, test={len(self.test_idx)})"
+        )
 
 
-def _allocate_split_counts(n: int, val_frac: float, test_frac: float) -> Tuple[int, int, int]:
-    """
-    Calculate how many samples go to train/val/test for a single class.
-    
+def _allocate_split_counts(
+    n: int, val_frac: float, test_frac: float
+) -> Tuple[int, int, int]:
+    """Calculate how many samples go to train/val/test for a single class.
+
     Handles edge cases for small classes:
     - 1 sample → all to train
     - 2 samples → 1 train, 1 val
     - 3 samples → 1 each
     - More → respect fractions with min 1 for val/test, min 2 for train
+
+    Args:
+        n: Total number of samples for the class.
+        val_frac: Fraction of samples for validation.
+        test_frac: Fraction of samples for test.
+
+    Returns:
+        Tuple of (n_train, n_val, n_test) sample counts.
     """
     if n <= 0:
         return 0, 0, 0
@@ -375,22 +442,24 @@ def split_label_index_stratified(
     test_frac: float = 0.15,
     seed: int = 42,
 ) -> SplitIndices:
-    """
-    Stratified 3-way split of dataset indices.
-    
+    """Stratified 3-way split of dataset indices.
+
+    Each class gets approximately the same train/val/test ratio.
+    Small classes are handled specially to ensure minimum representation.
+
     Args:
-        label_index: Dict mapping class_id → array of dataset indices
-        class_id_to_idx: Dict mapping class_id → contiguous label (0, 1, 2, ...)
-        val_frac: Fraction for validation (default 0.15)
-        test_frac: Fraction for test (default 0.15)
-        seed: Random seed for reproducibility
-    
+        label_index: Dict mapping class_id → array of dataset indices.
+        class_id_to_idx: Dict mapping class_id → contiguous label (0, 1, 2, ...).
+        val_frac: Fraction for validation. Defaults to 0.15.
+        test_frac: Fraction for test. Defaults to 0.15.
+        seed: Random seed for reproducibility. Defaults to 42.
+
     Returns:
-        SplitIndices with train/val/test indices and corresponding labels
-    
-    Note:
-        - Each class gets approximately the same train/val/test ratio
-        - Small classes are handled specially to ensure minimum representation
+        SplitIndices with train/val/test indices and corresponding labels.
+
+    Raises:
+        ValueError: If val_frac or test_frac are out of valid range,
+            or if their sum is >= 1.0.
     """
     if not (0.0 < val_frac < 1.0):
         raise ValueError("val_frac must be in (0, 1)")
@@ -412,16 +481,16 @@ def split_label_index_stratified(
         rng.shuffle(idxs)
 
         n_train, n_val, n_test = _allocate_split_counts(len(idxs), val_frac, test_frac)
-        
+
         y = class_id_to_idx[int(class_id)]
 
         train_idx.extend(idxs[:n_train].tolist())
         train_y.extend([y] * n_train)
-        
-        val_idx.extend(idxs[n_train:n_train + n_val].tolist())
+
+        val_idx.extend(idxs[n_train : n_train + n_val].tolist())
         val_y.extend([y] * n_val)
-        
-        test_idx.extend(idxs[n_train + n_val:n_train + n_val + n_test].tolist())
+
+        test_idx.extend(idxs[n_train + n_val : n_train + n_val + n_test].tolist())
         test_y.extend([y] * n_test)
 
     return SplitIndices(
@@ -434,19 +503,23 @@ def split_label_index_stratified(
     )
 
 
-
 # =============================================================================
 # IMAGE PREPROCESSING UTILITIES
 # =============================================================================
 
+
 def _ensure_uint8_rgb(img: np.ndarray) -> np.ndarray:
-    """
-    Convert any image format to uint8 RGB.
-    
-    Handles:
-    - Float images (0-1 or 0-255)
-    - Grayscale images (2D or with 1 channel)
-    - RGBA images (4 channels)
+    """Convert any image format to uint8 RGB.
+
+    Args:
+        img: Input image as numpy array. Handles float (0-1 or 0-255),
+            grayscale (2D or 1 channel), and RGBA (4 channels).
+
+    Returns:
+        Contiguous uint8 RGB array with shape (H, W, 3).
+
+    Raises:
+        ValueError: If image has unexpected shape.
     """
     arr = np.asarray(img)
     if arr.dtype != np.uint8:
@@ -468,11 +541,15 @@ def _ensure_uint8_rgb(img: np.ndarray) -> np.ndarray:
 
 
 def _pad_to_square(img: np.ndarray) -> np.ndarray:
-    """
-    Pad image to square using reflection padding.
-    
-    This preserves aspect ratio and avoids black borders which could
-    confuse the model.
+    """Pad image to square using reflection padding.
+
+    Preserves aspect ratio and avoids black borders which could confuse the model.
+
+    Args:
+        img: Input image as numpy array with shape (H, W) or (H, W, C).
+
+    Returns:
+        Square image with reflection padding applied to shorter dimension.
     """
     h, w = img.shape[:2]
     if h == w:
@@ -494,49 +571,53 @@ def _pad_to_square(img: np.ndarray) -> np.ndarray:
 # BOUNDING BOX UTILITIES (OPTIMIZED)
 # =============================================================================
 
+
 def resolve_bbox_from_box_array(
-    box: np.ndarray, 
-    img_h: int, 
-    img_w: int
+    box: np.ndarray, img_h: int, img_w: int
 ) -> Optional[Tuple[float, float, float, float]]:
     """
     Convert bbox to pixel-space (x1, y1, x2, y2) clipped to image bounds.
-    
+
     OPTIMIZED: Takes pre-loaded box array and image dimensions to avoid
     redundant image loading. Use this instead of resolve_bbox_xywh_or_xyxy()
     when the image is already loaded.
-    
+
     Handles:
     - Normalized xyxy (0-1 range)
     - xywh format
     - xyxy format
-    
+
     Args:
         box: Bounding box array from dataset (shape [4,] or [1, 4])
         img_h: Image height in pixels
         img_w: Image width in pixels
-    
+
     Returns:
         (x1, y1, x2, y2) in pixel coordinates, or None if invalid
     """
     box = np.asarray(box, dtype=float).squeeze()
     if box.shape[-1] != 4:
         return None
-    
+
     x1, y1, x2, y2 = box
     h, w = img_h, img_w
-    
+
     # Normalized corners (0-1 range)
     if 0 <= x1 <= 1 and 0 <= y1 <= 1 and 0 <= x2 <= 1 and 0 <= y2 <= 1:
         x1, y1, x2, y2 = x1 * w, y1 * h, x2 * w, y2 * h
     else:
         # (x, y, width, height) format
         width, height = x2, y2
-        if width > 0 and height > 0 and x1 + width <= w + 1e-3 and y1 + height <= h + 1e-3:
+        if (
+            width > 0
+            and height > 0
+            and x1 + width <= w + 1e-3
+            and y1 + height <= h + 1e-3
+        ):
             x2 = x1 + width
             y2 = y1 + height
         # else assume already (x1, y1, x2, y2)
-    
+
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w, x2), min(h, y2)
     if x2 <= x1 or y2 <= y1:
@@ -545,19 +626,17 @@ def resolve_bbox_from_box_array(
 
 
 def apply_bbox_crop_optimized(
-    img: np.ndarray, 
-    box: np.ndarray, 
-    padding_ratio: float = 0.15
+    img: np.ndarray, box: np.ndarray, padding_ratio: float = 0.15
 ) -> np.ndarray:
     """
     OPTIMIZED: Crop to bounding box with padding.
     Takes pre-loaded image and box array to avoid redundant DeepLake access.
-    
+
     Args:
         img: Input image (H, W, C) as numpy array
         box: Bounding box array from dataset
         padding_ratio: Extra padding around bbox as fraction of bbox size (default 15%)
-    
+
     Returns:
         Cropped image. If bbox is invalid, returns original image.
     """
@@ -600,8 +679,7 @@ def apply_bbox_crop_optimized(
     # Add reflection padding if needed
     if pad_left > 0 or pad_top > 0 or pad_right > 0 or pad_bottom > 0:
         cropped = cv2.copyMakeBorder(
-            cropped, pad_top, pad_bottom, pad_left, pad_right,
-            cv2.BORDER_REFLECT_101
+            cropped, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_REFLECT_101
         )
 
     return cropped
@@ -618,22 +696,54 @@ AUGMENTATION_REGISTRY: Dict[str, Callable[[], A.Compose]] = {}
 
 
 def register_augmentation(name: str):
-    """Decorator to register an augmentation pipeline."""
+    """Decorator to register an augmentation pipeline.
+
+    Args:
+        name: Unique name for the augmentation in the registry.
+
+    Returns:
+        Decorator function that registers the augmentation.
+    """
+
     def decorator(func):
         AUGMENTATION_REGISTRY[name] = func
         return func
+
     return decorator
 
 
 def get_augmentation(name: str) -> Optional[A.Compose]:
-    """Get an augmentation pipeline by name. Returns None if 'none'."""
+    """Get an augmentation pipeline by name.
+
+    Args:
+        name: Name of the registered augmentation, or 'none'/None.
+
+    Returns:
+        Composed augmentation pipeline, or None if name is 'none'.
+
+    Raises:
+        ValueError: If name is not in the registry and not 'none'.
+    """
     if name == "none" or name is None:
         return None
     if name not in AUGMENTATION_REGISTRY:
-        raise ValueError(f"Unknown augmentation: {name}. Available: {list(AUGMENTATION_REGISTRY.keys())}")
+        raise ValueError(
+            f"Unknown augmentation: {name}. Available: {list(AUGMENTATION_REGISTRY.keys())}"
+        )
     return AUGMENTATION_REGISTRY[name]()
 
+
 class BackgroundSubtract(A.ImageOnlyTransform):
+    """Albumentations transform for background subtraction.
+
+    Applies Gaussian blur and subtracts from original to enhance foreground details.
+
+    Args:
+        sigma: Gaussian blur sigma. Defaults to 3.0.
+        strength: Subtraction strength factor. Defaults to 0.8.
+        p: Probability of applying transform. Defaults to 0.5.
+    """
+
     def __init__(
         self,
         *,
@@ -646,6 +756,15 @@ class BackgroundSubtract(A.ImageOnlyTransform):
         self.strength = float(strength)
 
     def apply(self, img: np.ndarray, **params) -> np.ndarray:
+        """Apply background subtraction to the image.
+
+        Args:
+            img: Input image as numpy array.
+            **params: Additional parameters from Albumentations.
+
+        Returns:
+            Transformed image with background subtracted.
+        """
         sigma = max(self.sigma, 0.0)
         if sigma <= 0:
             return img
@@ -656,7 +775,9 @@ class BackgroundSubtract(A.ImageOnlyTransform):
         ksize = max(ksize, 3)
 
         blurred = cv2.GaussianBlur(img, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
-        out = img.astype(np.float32) - self.strength * blurred.astype(np.float32) + 128.0
+        out = (
+            img.astype(np.float32) - self.strength * blurred.astype(np.float32) + 128.0
+        )
         return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -801,7 +922,9 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
         blur_max = max(3, blur_max)
         if blur_max % 2 == 0:
             blur_max += 1
-        ops.append(A.GaussianBlur(blur_limit=(3, blur_max), p=min(max(p_blur, 0.0), 1.0)))
+        ops.append(
+            A.GaussianBlur(blur_limit=(3, blur_max), p=min(max(p_blur, 0.0), 1.0))
+        )
 
     # GaussNoise
     p_noise = _p("p_noise")
@@ -811,7 +934,9 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
         if std_max > 1.0:
             std_max = std_max / 255.0
         std_max = min(max(std_max, 0.0), 1.0)
-        ops.append(A.GaussNoise(std_range=(0.0, std_max), p=min(max(p_noise, 0.0), 1.0)))
+        ops.append(
+            A.GaussNoise(std_range=(0.0, std_max), p=min(max(p_noise, 0.0), 1.0))
+        )
 
     # CoarseDropout: p_dropout or p_cutout
     p_dropout = _p("p_dropout", "p_cutout")
@@ -819,8 +944,12 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
         holes_max = _i("dropout_holes_max", "cutout_holes", default=4)
         # cutout_size is a single value; use it for both min and max if specific ones not given
         cutout_size = _f("cutout_size", default=0.0)
-        hole_min = _f("dropout_hole_min", default=cutout_size if cutout_size > 0 else 0.05)
-        hole_max = _f("dropout_hole_max", default=cutout_size if cutout_size > 0 else 0.15)
+        hole_min = _f(
+            "dropout_hole_min", default=cutout_size if cutout_size > 0 else 0.05
+        )
+        hole_max = _f(
+            "dropout_hole_max", default=cutout_size if cutout_size > 0 else 0.15
+        )
         # Ensure hole_min <= hole_max
         if hole_min > hole_max:
             hole_min, hole_max = hole_max, hole_min
@@ -842,6 +971,15 @@ def resolve_train_augmentation(
     augmentation: str,
     augmentation_params: Mapping[str, Any] | None = None,
 ) -> Optional[A.Compose]:
+    """Resolve augmentation specification to a composed pipeline.
+
+    Args:
+        augmentation: One of 'none', a registry name, or 'recipe'.
+        augmentation_params: Parameters for 'recipe' augmentation.
+
+    Returns:
+        Composed augmentation pipeline, or None if 'none'.
+    """
     if augmentation in {None, "none"}:
         return None
     if augmentation == "recipe":
@@ -851,50 +989,86 @@ def resolve_train_augmentation(
 
 @register_augmentation("basic")
 def aug_basic():
-    """Basic augmentations: flip + slight color jitter."""
-    return A.Compose([
-        A.HorizontalFlip(p=0.5),
-        A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.5),
-    ])
+    """Basic augmentations: flip + slight color jitter.
+
+    Returns:
+        Composed augmentation pipeline with HorizontalFlip and ColorJitter.
+    """
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(
+                brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.5
+            ),
+        ]
+    )
 
 
 @register_augmentation("moderate")
 def aug_moderate():
-    """Moderate augmentations: flip + color + rotation + blur."""
-    return A.Compose([
-        A.HorizontalFlip(p=0.5),
-        A.Rotate(limit=15, border_mode=cv2.BORDER_REFLECT_101, p=0.5),
-        A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
-        A.OneOf([
-            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-            A.MotionBlur(blur_limit=5, p=1.0),
-        ], p=0.3),
-    ])
+    """Moderate augmentations: flip + color + rotation + blur.
+
+    Returns:
+        Composed augmentation pipeline with multiple transforms.
+    """
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.Rotate(limit=15, border_mode=cv2.BORDER_REFLECT_101, p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+            A.OneOf(
+                [
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                    A.MotionBlur(blur_limit=5, p=1.0),
+                ],
+                p=0.3,
+            ),
+        ]
+    )
 
 
 @register_augmentation("strong")
 def aug_strong():
-    """Strong augmentations: includes CoarseDropout, ShiftScale, etc."""
-    return A.Compose([
-        A.HorizontalFlip(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.15, rotate_limit=20, 
-                           border_mode=cv2.BORDER_REFLECT_101, p=0.5),
-        A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15, p=0.7),
-        A.OneOf([
-            A.GaussianBlur(blur_limit=(3, 7), p=1.0),
-            A.MotionBlur(blur_limit=7, p=1.0),
-            A.GaussNoise(std_range=(10, 30), p=1.0),
-        ], p=0.4),
-        A.CoarseDropout(num_holes_range=(1, 4), hole_height_range=(0.05, 0.15), 
-                        hole_width_range=(0.05, 0.15), p=0.3),
-    ])
+    """Strong augmentations: includes CoarseDropout, ShiftScale, etc.
 
-
+    Returns:
+        Composed augmentation pipeline with aggressive transforms.
+    """
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=0.1,
+                scale_limit=0.15,
+                rotate_limit=20,
+                border_mode=cv2.BORDER_REFLECT_101,
+                p=0.5,
+            ),
+            A.ColorJitter(
+                brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15, p=0.7
+            ),
+            A.OneOf(
+                [
+                    A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+                    A.MotionBlur(blur_limit=7, p=1.0),
+                    A.GaussNoise(std_range=(10, 30), p=1.0),
+                ],
+                p=0.4,
+            ),
+            A.CoarseDropout(
+                num_holes_range=(1, 4),
+                hole_height_range=(0.05, 0.15),
+                hole_width_range=(0.05, 0.15),
+                p=0.3,
+            ),
+        ]
+    )
 
 
 # =============================================================================
 # DATASET CLASS (OPTIMIZED)
 # =============================================================================
+
 
 class BirdDataset(Dataset):
     """PyTorch Dataset for bird classification with EfficientNet-B4.
@@ -906,17 +1080,17 @@ class BirdDataset(Dataset):
     Caching (optional):
     - Caches ONLY the deterministic base image after (optional) bbox-crop + (optional) pad-to-square.
     - Augmentations are NOT cached (they stay random each epoch).
-    
+
     OPTIMIZATION: Uses apply_bbox_crop_optimized() to avoid redundant DeepLake
     image loading. The image and box are loaded once per sample.
     """
 
     def __init__(
         self,
-        ds,
+        ds: DeepLakeDataset,
         indices: np.ndarray,
         labels: np.ndarray,
-        weights,
+        weights: EfficientNetWeights,
         preprocess_mode: str = "native",
         bbox_padding_ratio: float = 0.15,
         pad_to_square: bool = True,
@@ -955,12 +1129,14 @@ class BirdDataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, i: int) -> Tuple[torch.Tensor, int] | Tuple[torch.Tensor, int, int]:
+    def __getitem__(
+        self, i: int
+    ) -> Tuple[torch.Tensor, int] | Tuple[torch.Tensor, int, int]:
         idx = int(self.indices[i])
 
         cache_path = self._cache_path(idx)
         img = None
-        
+
         # Try to load from cache (with corruption handling)
         if cache_path is not None and cache_path.exists():
             try:
@@ -972,7 +1148,7 @@ class BirdDataset(Dataset):
                 except Exception:
                     pass
                 img = None  # Will be regenerated below
-        
+
         # Generate image if not loaded from cache
         if img is None:
             # OPTIMIZED: Load sample once, get both image and box
@@ -982,7 +1158,9 @@ class BirdDataset(Dataset):
             if self.preprocess_mode == "bbox_crop":
                 # OPTIMIZED: Use pre-loaded box array instead of re-fetching from dataset
                 box = sample["boxes"].numpy()
-                img = apply_bbox_crop_optimized(img, box, padding_ratio=self.bbox_padding_ratio)
+                img = apply_bbox_crop_optimized(
+                    img, box, padding_ratio=self.bbox_padding_ratio
+                )
                 img = _ensure_uint8_rgb(img)
 
             if self.pad_to_square:
@@ -1010,33 +1188,38 @@ class BirdDataset(Dataset):
 # MODEL BUILDING
 # =============================================================================
 
-def build_efficientnet_b4(num_classes: int) -> Tuple[nn.Module, object]:
-    """
-    Build EfficientNet-B4 with a new classification head.
-    
+
+def build_efficientnet_b4(num_classes: int) -> Tuple[nn.Module, EfficientNetWeights]:
+    """Build EfficientNet-B4 with a new classification head.
+
     Architecture:
     - Backbone: EfficientNet-B4 pretrained on ImageNet
     - Classifier: Dropout(0.4) → Linear(1792 → num_classes)
-    
+
+    Args:
+        num_classes: Number of output classes for the classifier.
+
     Returns:
-        (model, weights) tuple where weights contains the preprocessing transforms
+        Tuple of (model, weights) where weights contains preprocessing transforms.
     """
     weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
     model = models.efficientnet_b4(weights=weights)
-    
+
     # Replace classifier (original: Linear(1792 → 1000))
     in_features = model.classifier[-1].in_features  # 1792
     model.classifier[-1] = nn.Linear(in_features, num_classes)
-    
+
     return model, weights
 
 
 def freeze_backbone(model: nn.Module) -> None:
-    """
-    Freeze all layers except the classifier head.
-    
+    """Freeze all layers except the classifier head.
+
     Used in Stage 1 of training to train only the randomly initialized head
     while keeping pretrained backbone weights fixed.
+
+    Args:
+        model: EfficientNet model with classifier attribute.
     """
     for p in model.parameters():
         p.requires_grad = False
@@ -1045,13 +1228,21 @@ def freeze_backbone(model: nn.Module) -> None:
 
 
 def unfreeze_all(model: nn.Module) -> None:
-    """Unfreeze all layers for fine-tuning."""
+    """Unfreeze all layers for fine-tuning.
+
+    Args:
+        model: PyTorch model to unfreeze.
+    """
     for p in model.parameters():
         p.requires_grad = True
 
 
 def set_batchnorm_eval(module: nn.Module) -> None:
-    """Set BatchNorm layers to eval mode (keeps running stats frozen)."""
+    """Set BatchNorm layers to eval mode (keeps running stats frozen).
+
+    Args:
+        module: PyTorch module to check and potentially set to eval.
+    """
     if isinstance(module, nn.modules.batchnorm._BatchNorm):
         module.eval()
 
@@ -1060,17 +1251,25 @@ def set_batchnorm_eval(module: nn.Module) -> None:
 # OPTIONAL: torch.compile() for PyTorch 2.0+ (10-30% speedup)
 # =============================================================================
 
+
 def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
-    """
-    Compile model with torch.compile for 10-30% speedup (PyTorch 2.0+).
+    """Compile model with torch.compile for 10-30% speedup (PyTorch 2.0+).
+
     Falls back gracefully on older versions or unsupported platforms.
+
+    Args:
+        model: PyTorch model to compile.
+        enable: Whether to attempt compilation. Defaults to True.
+
+    Returns:
+        Compiled model if successful, original model otherwise.
     """
     if not enable:
         return model
-    
-    if hasattr(torch, 'compile') and torch.cuda.is_available():
+
+    if hasattr(torch, "compile") and torch.cuda.is_available():
         try:
-            compiled = torch.compile(model, mode='reduce-overhead')
+            compiled = torch.compile(model, mode="reduce-overhead")
             print("torch.compile enabled (10-30% speedup)")
             return compiled
         except Exception as e:
@@ -1083,19 +1282,25 @@ def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
 # TRAINING UTILITIES
 # =============================================================================
 
+
 def make_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
-    """
-    Create a weighted sampler for class imbalance.
-    
+    """Create a weighted sampler for class imbalance.
+
     Classes with fewer samples get higher sampling probability,
     ensuring each class is seen roughly equally often per epoch.
+
+    Args:
+        labels: Array of class labels for each sample.
+
+    Returns:
+        WeightedRandomSampler configured for balanced sampling.
     """
     labels = np.asarray(labels, dtype=int)
     counts = np.bincount(labels)
     counts[counts == 0] = 1  # Avoid division by zero
     class_weights = 1.0 / counts
     sample_weights = class_weights[labels]
-    
+
     return WeightedRandomSampler(
         weights=torch.as_tensor(sample_weights, dtype=torch.double),
         num_samples=len(sample_weights),
@@ -1111,19 +1316,22 @@ def make_dataloader(
     num_workers: int = 0,
 ) -> DataLoader:
     """Create a DataLoader with appropriate settings.
-    
+
     Args:
-        dataset: PyTorch Dataset
-        batch_size: Batch size
-        shuffle: Whether to shuffle (ignored if sampler is provided)
-        sampler: Optional weighted sampler
-        num_workers: Number of worker processes. Use 0 for DeepLake without caching,
-                     or 4 when using cached PNG files for ~3x speedup.
+        dataset: PyTorch Dataset to load from.
+        batch_size: Number of samples per batch.
+        shuffle: Whether to shuffle. Ignored if sampler is provided.
+        sampler: Optional weighted sampler for class balancing.
+        num_workers: Number of worker processes. Use 0 for DeepLake without
+            caching, or 4 when using cached PNG files for ~3x speedup.
+
+    Returns:
+        Configured DataLoader ready for training or evaluation.
     """
     mp_context = None
     if num_workers > 0 and platform.system() == "Linux":
         mp_context = multiprocessing.get_context("spawn")
-    
+
     return DataLoader(
         dataset,
         batch_size=max(1, int(batch_size)),
@@ -1138,7 +1346,15 @@ def make_dataloader(
 
 
 def compute_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
-    """Compute classification metrics."""
+    """Compute classification metrics.
+
+    Args:
+        y_true: Ground truth labels.
+        y_pred: Predicted labels.
+
+    Returns:
+        Dict with 'acc', 'precision', 'recall', and 'f1' (macro-averaged).
+    """
     prec, rec, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="macro", zero_division=0
     )
@@ -1158,7 +1374,17 @@ def evaluate(
     device: torch.device,
     criterion: nn.Module,
 ) -> Dict[str, float]:
-    """Evaluate model on a dataloader."""
+    """Evaluate model on a dataloader.
+
+    Args:
+        model: PyTorch model to evaluate.
+        loader: DataLoader yielding (inputs, labels) batches.
+        device: Device to run evaluation on.
+        criterion: Loss function for computing loss.
+
+    Returns:
+        Dict with 'loss', 'acc', 'precision', 'recall', and 'f1' metrics.
+    """
     model.eval()
     total_loss = 0.0
     n = 0
@@ -1169,11 +1395,11 @@ def evaluate(
         x, y = x.to(device), y.to(device)
         logits = model(x)
         loss = criterion(logits, y)
-        
+
         bs = x.shape[0]
         total_loss += float(loss.item()) * bs
         n += bs
-        
+
         y_true.extend(y.cpu().tolist())
         y_pred.extend(logits.argmax(dim=1).cpu().tolist())
 
@@ -1190,7 +1416,20 @@ def evaluate_with_preds(
     criterion: nn.Module,
     topk: int = 5,
 ) -> Tuple[Dict[str, float], List[int], List[int], List[int] | None]:
-    """Evaluate model and also return (y_true, y_pred) for detailed reports."""
+    """Evaluate model and return predictions for detailed analysis.
+
+    Args:
+        model: PyTorch model to evaluate.
+        loader: DataLoader yielding (inputs, labels[, indices]) batches.
+        device: Device to run evaluation on.
+        criterion: Loss function for computing loss.
+        topk: Number of top predictions to consider for top-k accuracy.
+
+    Returns:
+        Tuple of (metrics_dict, y_true, y_pred, sample_indices).
+        metrics_dict includes 'loss', 'acc', 'precision', 'recall', 'f1', 'top5_acc'.
+        sample_indices is None if loader doesn't return indices.
+    """
     model.eval()
     total_loss = 0.0
     n = 0
@@ -1240,15 +1479,31 @@ def train_one_epoch(
     grad_clip_norm: float = 1.0,
     freeze_bn: bool = True,
 ) -> Dict[str, float]:
-    """Train for one epoch."""
+    """Train model for one epoch.
+
+    Args:
+        model: PyTorch model to train.
+        loader: DataLoader yielding (inputs, labels) batches.
+        device: Device to run training on.
+        criterion: Loss function.
+        optimizer: Optimizer for parameter updates.
+        use_amp: Whether to use automatic mixed precision. Defaults to True.
+        grad_clip_norm: Maximum gradient norm for clipping. Defaults to 1.0.
+        freeze_bn: Whether to keep BatchNorm in eval mode. Defaults to True.
+
+    Returns:
+        Dict with 'loss', 'acc', 'precision', 'recall', and 'f1' metrics.
+    """
     model.train()
-    
+
     # Keep BatchNorm in eval mode if requested (recommended for fine-tuning)
     if freeze_bn:
         model.apply(set_batchnorm_eval)
-    
-    scaler = torch.amp.GradScaler('cuda') if (use_amp and device.type == "cuda") else None
-    
+
+    scaler = (
+        torch.amp.GradScaler("cuda") if (use_amp and device.type == "cuda") else None
+    )
+
     total_loss = 0.0
     n = 0
     y_true, y_pred = [], []
@@ -1258,7 +1513,10 @@ def train_one_epoch(
         torch.cuda.empty_cache()
         allocated = torch.cuda.memory_allocated() / 1e9
         reserved = torch.cuda.memory_reserved() / 1e9
-        print(f"    GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved", flush=True)
+        print(
+            f"    GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved",
+            flush=True,
+        )
 
     # NOTE: First batch may be slow due to DeepLake cloud download + cache building
     print("    Loading first batch...", flush=True)
@@ -1270,7 +1528,7 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         if scaler is not None:
-            with torch.amp.autocast('cuda'):
+            with torch.amp.autocast("cuda"):
                 logits = model(x)
                 loss = criterion(logits, y)
             scaler.scale(loss).backward()
@@ -1288,7 +1546,10 @@ def train_one_epoch(
         # Debug: Print memory after first batch
         if first_batch and device.type == "cuda":
             peak_mem = torch.cuda.max_memory_allocated() / 1e9
-            print(f"    First batch complete. Peak GPU memory: {peak_mem:.2f}GB", flush=True)
+            print(
+                f"    First batch complete. Peak GPU memory: {peak_mem:.2f}GB",
+                flush=True,
+            )
             first_batch = False
 
         bs = x.shape[0]
@@ -1296,7 +1557,7 @@ def train_one_epoch(
         n += bs
         y_true.extend(y.cpu().tolist())
         y_pred.extend(logits.argmax(dim=1).cpu().tolist())
-        
+
         pbar.set_postfix(loss=total_loss / n)
 
     metrics = compute_metrics(y_true, y_pred)
@@ -1308,6 +1569,7 @@ def train_one_epoch(
 # EVALUATION UTILITIES: Training Curves, Confusion Matrix, Classification Report
 # =============================================================================
 
+
 def plot_evaluation_suite(
     history_df: pd.DataFrame,
     y_true: List[int],
@@ -1315,7 +1577,7 @@ def plot_evaluation_suite(
     class_ids: List[int],
     run_name: str = "",
     *,
-    ds=None,
+    ds: Optional[DeepLakeDataset] = None,
     sample_indices: List[int] | None = None,
     id_to_name: Dict[int, str] | None = None,
     train_label_index: Dict[int, np.ndarray] | None = None,
@@ -1326,12 +1588,12 @@ def plot_evaluation_suite(
 ) -> None:
     """
     Comprehensive evaluation visualization after training.
-    
+
     Displays:
     1. Training curves (loss, accuracy, F1)
     2. Confusion matrix (top confused classes)
     3. Classification report summary (worst performing classes)
-    
+
     Args:
         history_df: Training history DataFrame with columns:
                     [stage, epoch, global_epoch, train_loss, val_loss, train_acc, val_acc, train_f1, val_f1]
@@ -1374,7 +1636,13 @@ def plot_evaluation_suite(
             ("Classes", int(len(class_ids))),
             (
                 "Classes with F1=0",
-                int(sum(1 for i in range(len(class_ids)) if report.get(str(i), {}).get("f1-score", 1.0) == 0)),
+                int(
+                    sum(
+                        1
+                        for i in range(len(class_ids))
+                        if report.get(str(i), {}).get("f1-score", 1.0) == 0
+                    )
+                ),
             ),
             ("Best Val F1", best_f1),
             ("Best Val F1 Epoch", best_epoch),
@@ -1402,10 +1670,28 @@ def plot_evaluation_suite(
     val_rec_color = "#f39c12"
 
     ax1 = fig.add_subplot(gs[0, 0])
-    ax1.plot(epochs, history_df["train_loss"], label="Train", color=train_color, marker="o", markersize=4, linewidth=2)
-    ax1.plot(epochs, history_df["val_loss"], label="Val", color=val_color, marker="s", markersize=4, linewidth=2)
+    ax1.plot(
+        epochs,
+        history_df["train_loss"],
+        label="Train",
+        color=train_color,
+        marker="o",
+        markersize=4,
+        linewidth=2,
+    )
+    ax1.plot(
+        epochs,
+        history_df["val_loss"],
+        label="Val",
+        color=val_color,
+        marker="s",
+        markersize=4,
+        linewidth=2,
+    )
     if head_epochs > 0:
-        ax1.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
+        ax1.axvline(
+            x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+        )
     ax1.set_xlabel("Epoch")
     ax1.set_ylabel("Loss")
     ax1.set_title("Loss", fontweight="bold")
@@ -1413,10 +1699,28 @@ def plot_evaluation_suite(
     ax1.grid(True, alpha=0.3)
 
     ax2 = fig.add_subplot(gs[0, 1])
-    ax2.plot(epochs, history_df["train_acc"], label="Train", color=train_color, marker="o", markersize=4, linewidth=2)
-    ax2.plot(epochs, history_df["val_acc"], label="Val", color=val_color, marker="s", markersize=4, linewidth=2)
+    ax2.plot(
+        epochs,
+        history_df["train_acc"],
+        label="Train",
+        color=train_color,
+        marker="o",
+        markersize=4,
+        linewidth=2,
+    )
+    ax2.plot(
+        epochs,
+        history_df["val_acc"],
+        label="Val",
+        color=val_color,
+        marker="s",
+        markersize=4,
+        linewidth=2,
+    )
     if head_epochs > 0:
-        ax2.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
+        ax2.axvline(
+            x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+        )
     ax2.set_xlabel("Epoch")
     ax2.set_ylabel("Accuracy")
     ax2.set_title("Accuracy", fontweight="bold")
@@ -1425,8 +1729,24 @@ def plot_evaluation_suite(
     ax2.set_ylim(0, 1)
 
     ax3 = fig.add_subplot(gs[0, 2])
-    ax3.plot(epochs, history_df["train_f1"], label="Train F1", color=train_color, marker="o", markersize=4, linewidth=2)
-    ax3.plot(epochs, history_df["val_f1"], label="Val F1", color=val_color, marker="s", markersize=4, linewidth=2)
+    ax3.plot(
+        epochs,
+        history_df["train_f1"],
+        label="Train F1",
+        color=train_color,
+        marker="o",
+        markersize=4,
+        linewidth=2,
+    )
+    ax3.plot(
+        epochs,
+        history_df["val_f1"],
+        label="Val F1",
+        color=val_color,
+        marker="s",
+        markersize=4,
+        linewidth=2,
+    )
 
     if "train_precision" in history_df.columns:
         ax3.plot(
@@ -1468,7 +1788,9 @@ def plot_evaluation_suite(
         )
 
     if head_epochs > 0:
-        ax3.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
+        ax3.axvline(
+            x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+        )
     ax3.set_xlabel("Epoch")
     ax3.set_ylabel("Macro Score")
     ax3.set_title("Macro F1 / Precision / Recall", fontweight="bold")
@@ -1500,7 +1822,9 @@ def plot_evaluation_suite(
         # No confusions (or only correct predictions). Show a small subset so the plot still renders.
         confused_class_idxs = set(range(min(int(top_n_cm_classes), len(class_ids))))
 
-    confused_class_idxs = sorted(confused_class_idxs)[: max(2, int(min(top_n_cm_classes, len(class_ids))))]
+    confused_class_idxs = sorted(confused_class_idxs)[
+        : max(2, int(min(top_n_cm_classes, len(class_ids))))
+    ]
 
     cm_subset = cm[np.ix_(confused_class_idxs, confused_class_idxs)]
     tick_labels = [str(class_ids[i]) for i in confused_class_idxs]
@@ -1517,7 +1841,10 @@ def plot_evaluation_suite(
     )
     ax6.set_xlabel("Predicted Class ID", fontsize=10)
     ax6.set_ylabel("True Class ID", fontsize=10)
-    ax6.set_title(f"Confusion Matrix for Top {len(confused_class_idxs)} Confused Classes", fontweight="bold")
+    ax6.set_title(
+        f"Confusion Matrix for Top {len(confused_class_idxs)} Confused Classes",
+        fontweight="bold",
+    )
     ax6.set_xticklabels(ax6.get_xticklabels(), rotation=45, ha="right", fontsize=8)
     ax6.set_yticklabels(ax6.get_yticklabels(), rotation=0, fontsize=8)
 
@@ -1530,11 +1857,24 @@ def plot_evaluation_suite(
         for true_i, pred_i, count in top_pairs:
             true_id = class_ids[true_i]
             pred_id = class_ids[pred_i]
-            true_name = id_to_name.get(true_id, f"ID_{true_id}") if id_to_name else f"ID_{true_id}"
-            pred_name = id_to_name.get(pred_id, f"ID_{pred_id}") if id_to_name else f"ID_{pred_id}"
+            true_name = (
+                id_to_name.get(true_id, f"ID_{true_id}")
+                if id_to_name
+                else f"ID_{true_id}"
+            )
+            pred_name = (
+                id_to_name.get(pred_id, f"ID_{pred_id}")
+                if id_to_name
+                else f"ID_{pred_id}"
+            )
             print(f"  {true_name} -> {pred_name}: {count} misclassifications")
 
-    if ds is not None and sample_indices is not None and len(sample_indices) == len(y_true) and top_pairs:
+    if (
+        ds is not None
+        and sample_indices is not None
+        and len(sample_indices) == len(y_true)
+        and top_pairs
+    ):
         _plot_confused_pair_examples(
             ds=ds,
             sample_indices=sample_indices,
@@ -1550,7 +1890,7 @@ def plot_evaluation_suite(
 
 def _plot_confused_pair_examples(
     *,
-    ds,
+    ds: Optional[DeepLakeDataset],
     sample_indices: List[int],
     y_true: List[int],
     y_pred: List[int],
@@ -1563,11 +1903,11 @@ def _plot_confused_pair_examples(
 ) -> None:
     """
     Plot examples of confused pairs with optional reference images of the predicted class.
-    
+
     Each row shows:
     - Misclassified examples (actual class, predicted as wrong class)
     - A reference image of the predicted (wrong) class for comparison
-    
+
     Args:
         ds: DeepLake dataset
         sample_indices: Indices into ds for each prediction
@@ -1588,7 +1928,7 @@ def _plot_confused_pair_examples(
     # Add 1 column for reference image if train_label_index is available
     show_reference = train_label_index is not None
     n_cols = images_per_pair + (1 if show_reference else 0)
-    
+
     if figsize is None:
         figsize = (n_cols * 3.2, max(3.0, n_pairs * 2.8))
 
@@ -1599,18 +1939,26 @@ def _plot_confused_pair_examples(
         axes = axes.reshape(-1, 1)
 
     for row, (true_i, pred_i, count) in enumerate(pairs):
-        matches = [k for k, (yt, yp) in enumerate(zip(y_true, y_pred)) if yt == true_i and yp == pred_i]
+        matches = [
+            k
+            for k, (yt, yp) in enumerate(zip(y_true, y_pred))
+            if yt == true_i and yp == pred_i
+        ]
         chosen = matches[:images_per_pair]
         while len(chosen) < images_per_pair:
             chosen.append(None)
 
         true_id = class_ids[true_i]
         pred_id = class_ids[pred_i]
-        
+
         # Get species names
-        true_name = id_to_name.get(true_id, f"ID_{true_id}") if id_to_name else f"ID_{true_id}"
-        pred_name = id_to_name.get(pred_id, f"ID_{pred_id}") if id_to_name else f"ID_{pred_id}"
-        
+        true_name = (
+            id_to_name.get(true_id, f"ID_{true_id}") if id_to_name else f"ID_{true_id}"
+        )
+        pred_name = (
+            id_to_name.get(pred_id, f"ID_{pred_id}") if id_to_name else f"ID_{pred_id}"
+        )
+
         # Truncate long names for display
         true_name_short = true_name[:25] + "..." if len(true_name) > 28 else true_name
         pred_name_short = pred_name[:25] + "..." if len(pred_name) > 28 else pred_name
@@ -1629,16 +1977,19 @@ def _plot_confused_pair_examples(
                 continue
             ax.imshow(img)
             if col == 0:
-                ax.set_title(f"Actual: {true_name_short}\n→ Pred: {pred_name_short} (n={count})", 
-                           fontsize=8, color="red")
+                ax.set_title(
+                    f"Actual: {true_name_short}\n→ Pred: {pred_name_short} (n={count})",
+                    fontsize=8,
+                    color="red",
+                )
             else:
                 ax.set_title("Misclassified", fontsize=8, color="red")
-        
+
         # Plot reference image of predicted class (last column)
         if show_reference:
             ref_ax = axes[row, -1]
             ref_ax.axis("off")
-            
+
             # Find a reference image of the predicted class
             if pred_id in train_label_index and len(train_label_index[pred_id]) > 0:
                 ref_idx = int(train_label_index[pred_id][0])
@@ -1646,49 +1997,60 @@ def _plot_confused_pair_examples(
                     ref_sample = ds[ref_idx]
                     ref_img = _ensure_uint8_rgb(ref_sample["images"].numpy())
                     ref_ax.imshow(ref_img)
-                    ref_ax.set_title(f"Reference:\n{pred_name_short}", fontsize=8, color="green")
+                    ref_ax.set_title(
+                        f"Reference:\n{pred_name_short}", fontsize=8, color="green"
+                    )
                     # Add a green border to distinguish reference
                     for spine in ref_ax.spines.values():
                         spine.set_visible(True)
                         spine.set_color("green")
                         spine.set_linewidth(3)
                 except Exception:
-                    ref_ax.text(0.5, 0.5, "Reference\nN/A", ha="center", va="center", fontsize=9)
+                    ref_ax.text(
+                        0.5, 0.5, "Reference\nN/A", ha="center", va="center", fontsize=9
+                    )
 
-    fig.suptitle("Confused Pair Examples (with Reference Images)", fontsize=12, fontweight="bold")
+    fig.suptitle(
+        "Confused Pair Examples (with Reference Images)", fontsize=12, fontweight="bold"
+    )
     plt.tight_layout()
     plt.show()
-
 
 
 # =============================================================================
 # VISUALIZE PREPROCESSING (VERIFY BEFORE TRAINING)
 # =============================================================================
 
+
 def visualize_preprocessing_comparison(
-    ds,
+    ds: DeepLakeDataset,
     indices: List[int],
     bbox_padding_ratio: float = 0.15,
     figsize: Tuple[int, int] = (16, 12),
 ) -> None:
-    """
-    Visualize the two preprocessing modes side-by-side.
-    
+    """Visualize the two preprocessing modes side-by-side.
+
     Shows for each sample:
     1. Original image
     2. Native preprocessing (pad-to-square → EfficientNet transforms)
     3. Bbox crop preprocessing (crop → pad-to-square → EfficientNet transforms)
     4. Original with bounding box overlay
-    
-    IMPORTANT: Run this BEFORE training to verify preprocessing looks correct!
+
+    Run this BEFORE training to verify preprocessing looks correct!
+
+    Args:
+        ds: DeepLake dataset containing images and bounding boxes.
+        indices: List of dataset indices to visualize.
+        bbox_padding_ratio: Padding around bbox as fraction of bbox size.
+        figsize: Figure size (width, height).
     """
     weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
     preprocess = weights.transforms()
-    
+
     # Get normalization params for denormalization
     mean = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
-    
+
     def tensor_to_display(t: torch.Tensor) -> np.ndarray:
         """Convert normalized tensor back to displayable image."""
         t_cpu = t.detach().cpu().float()
@@ -1696,19 +2058,19 @@ def visualize_preprocessing_comparison(
         t_cpu = t_cpu * std + mean
         t_cpu = t_cpu.clamp(0, 1)
         return t_cpu.permute(1, 2, 0).numpy()
-    
+
     n_samples = len(indices)
     fig, axes = plt.subplots(n_samples, 4, figsize=figsize)
     if n_samples == 1:
         axes = axes.reshape(1, -1)
-    
+
     col_titles = [
         "Original",
         "Native (pad→resize→crop→norm)",
-        "Bbox crop (crop→pad→resize→norm)", 
-        "Bounding Box Overlay"
+        "Bbox crop (crop→pad→resize→norm)",
+        "Bounding Box Overlay",
     ]
-    
+
     for row, idx in enumerate(indices):
         # Load sample once (OPTIMIZED: avoid multiple DeepLake accesses)
         sample = ds[idx]
@@ -1717,12 +2079,12 @@ def visualize_preprocessing_comparison(
         box = sample["boxes"].numpy()
         bbox = resolve_bbox_from_box_array(box, h, w)
         class_id = int(sample["labels"].numpy().item())
-        
+
         # Column 0: Original
         axes[row, 0].imshow(img)
         axes[row, 0].set_title(f"Original ({w}×{h})", fontsize=9)
         axes[row, 0].axis("off")
-        
+
         # Column 1: Native preprocessing
         img_padded = _pad_to_square(img)
         tensor_native = preprocess(Image.fromarray(img_padded))
@@ -1730,7 +2092,7 @@ def visualize_preprocessing_comparison(
         axes[row, 1].imshow(native_display)
         axes[row, 1].set_title(f"Native (380×380)", fontsize=9)
         axes[row, 1].axis("off")
-        
+
         # Column 2: Bbox crop preprocessing (OPTIMIZED: use pre-loaded box)
         img_bbox = apply_bbox_crop_optimized(img, box, padding_ratio=bbox_padding_ratio)
         img_bbox = _ensure_uint8_rgb(img_bbox)
@@ -1741,45 +2103,58 @@ def visualize_preprocessing_comparison(
         crop_h, crop_w = img_bbox.shape[:2]
         axes[row, 2].set_title(f"Bbox crop ({crop_w}×{crop_h}→380×380)", fontsize=9)
         axes[row, 2].axis("off")
-        
+
         # Column 3: Original with bbox overlay
         axes[row, 3].imshow(img)
         if bbox is not None:
             x1, y1, x2, y2 = map(float, bbox)
             box_w, box_h = x2 - x1, y2 - y1
             coverage = box_w * box_h / (h * w) * 100
-            
+
             # Draw bbox
-            rect = plt.Rectangle((x1, y1), box_w, box_h,
-                                  fill=False, edgecolor="lime", linewidth=2)
+            rect = plt.Rectangle(
+                (x1, y1), box_w, box_h, fill=False, edgecolor="lime", linewidth=2
+            )
             axes[row, 3].add_patch(rect)
-            
+
             # Draw padded region
             pad_x = int(box_w * bbox_padding_ratio)
             pad_y = int(box_h * bbox_padding_ratio)
             padded_rect = plt.Rectangle(
-                (max(0, x1-pad_x), max(0, y1-pad_y)),
-                min(w, x2+pad_x) - max(0, x1-pad_x),
-                min(h, y2+pad_y) - max(0, y1-pad_y),
-                fill=False, edgecolor="yellow", linewidth=1, linestyle="--"
+                (max(0, x1 - pad_x), max(0, y1 - pad_y)),
+                min(w, x2 + pad_x) - max(0, x1 - pad_x),
+                min(h, y2 + pad_y) - max(0, y1 - pad_y),
+                fill=False,
+                edgecolor="yellow",
+                linewidth=1,
+                linestyle="--",
             )
             axes[row, 3].add_patch(padded_rect)
             axes[row, 3].set_title(f"Bbox: {coverage:.1f}% of image", fontsize=9)
         else:
             axes[row, 3].set_title("No bbox available", fontsize=9)
         axes[row, 3].axis("off")
-        
+
         # Row label
-        axes[row, 0].set_ylabel(f"Class {class_id}\nIdx {idx}", 
-                                 fontsize=9, rotation=0, ha="right", va="center", labelpad=40)
-    
+        axes[row, 0].set_ylabel(
+            f"Class {class_id}\nIdx {idx}",
+            fontsize=9,
+            rotation=0,
+            ha="right",
+            va="center",
+            labelpad=40,
+        )
+
     # Column titles
     for ax, title in zip(axes[0], col_titles):
         ax.set_title(title, fontsize=11, fontweight="bold")
-    
-    plt.suptitle("Preprocessing Comparison: Native vs Bbox Crop\n"
-                 "(Green = bbox, Yellow dashed = crop region with padding)",
-                 fontsize=12, y=1.02)
+
+    plt.suptitle(
+        "Preprocessing Comparison: Native vs Bbox Crop\n"
+        "(Green = bbox, Yellow dashed = crop region with padding)",
+        fontsize=12,
+        y=1.02,
+    )
     plt.tight_layout()
     plt.show()
 
@@ -1788,11 +2163,12 @@ def visualize_preprocessing_comparison(
 # TRAINING CONFIGURATION
 # =============================================================================
 
+
 @dataclass
 class TrainConfig:
     """
     All hyperparameters for a training experiment.
-    
+
     Attributes:
         run_name: Unique name for this experiment (used for saving)
         preprocess_mode: 'native' or 'bbox_crop'
@@ -1800,35 +2176,36 @@ class TrainConfig:
         augmentation_params: Parameters for 'recipe' augmentation
         bbox_padding_ratio: Padding around bbox as fraction of bbox size
         pad_to_square: Whether to pad images to square before model transforms
-        
+
         batch_size: Training batch size
         head_epochs: Number of epochs to train head only (Stage 1)
         finetune_epochs: Number of epochs to fine-tune all layers (Stage 2)
-        
+
         lr_head: Learning rate for head during Stage 1
         lr_backbone: Learning rate for backbone during Stage 2
         lr_head_finetune: Learning rate for head during Stage 2
         weight_decay: AdamW weight decay
         label_smoothing: Label smoothing for CrossEntropyLoss
-        
+
         use_weighted_sampler: Whether to use weighted sampling for class imbalance
         use_amp: Whether to use automatic mixed precision (faster on GPU)
         use_torch_compile: Whether to use torch.compile for speedup (PyTorch 2.0+)
         grad_clip_norm: Gradient clipping max norm
-        
+
         freeze_bn_head: Keep BatchNorm in eval mode during Stage 1
         freeze_bn_finetune: Keep BatchNorm in eval mode during Stage 2
 
         resume_head_ckpt: Optional path to a previously saved best head checkpoint (.pt).
           If set, Stage 1 is skipped and training starts from that checkpoint.
-        
+
         early_stop_patience: Stop if val F1 doesn't improve for N epochs (0 = disabled)
-        
+
         seed: Random seed
     """
+
     # Experiment identification
     run_name: str = "effnetb4_baseline_v1"
-    
+
     # Preprocessing
     preprocess_mode: str = "native"  # 'native' or 'bbox_crop'
     augmentation: str = "none"  # 'none', registry name, or 'recipe'
@@ -1839,107 +2216,120 @@ class TrainConfig:
     # Caching (optional): persistent cache dir (e.g. Google Drive)
     cache_dir: str | None = None  # e.g. str(CACHE_DIR)
     cache_version: str = "v1_uint8_rgb_pad_bbox"
-    
+
     # Training schedule
     batch_size: int = 16
     head_epochs: int = 3
     finetune_epochs: int = 10
-    
+
     # Learning rates
     lr_head: float = 3e-3
     lr_backbone: float = 3e-5
     lr_head_finetune: float = 3e-4
     weight_decay: float = 1e-4
     label_smoothing: float = 0.0
-    
+
     # Training options
     use_weighted_sampler: bool = True
     use_amp: bool = True
     use_torch_compile: bool = True  # PyTorch 2.0+ speedup (10-30%)
     grad_clip_norm: float = 1.0
-    
+
     # BatchNorm handling
     freeze_bn_head: bool = True
     freeze_bn_finetune: bool = True
 
     # Resume (optional)
     resume_head_ckpt: str | None = None
-    
+
     # Early stopping (0 = disabled)
     early_stop_patience: int = 3
-    
+
     # Reproducibility
     seed: int = 42
-    
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.preprocess_mode not in {"native", "bbox_crop"}:
-            raise ValueError(f"preprocess_mode must be 'native' or 'bbox_crop', got '{self.preprocess_mode}'")
+            raise ValueError(
+                f"preprocess_mode must be 'native' or 'bbox_crop', got '{self.preprocess_mode}'"
+            )
         if self.augmentation == "recipe":
-            if not isinstance(self.augmentation_params, dict) or not self.augmentation_params:
-                raise ValueError("augmentation_params must be a non-empty dict when augmentation='recipe'")
+            if (
+                not isinstance(self.augmentation_params, dict)
+                or not self.augmentation_params
+            ):
+                raise ValueError(
+                    "augmentation_params must be a non-empty dict when augmentation='recipe'"
+                )
             return
-        if self.augmentation not in AUGMENTATION_REGISTRY and self.augmentation != "none":
+        if (
+            self.augmentation not in AUGMENTATION_REGISTRY
+            and self.augmentation != "none"
+        ):
             raise ValueError(
                 f"augmentation must be one of {list(AUGMENTATION_REGISTRY.keys())}, 'recipe', or 'none'"
             )
-
-
 
 
 # =============================================================================
 # TWO-STAGE TRAINING FUNCTION
 # =============================================================================
 
+
 def train_two_stage(
     cfg: TrainConfig,
-    ds_train,
+    ds_train: DeepLakeDataset,
     train_label_index: Dict[int, np.ndarray],
-    ds_holdout=None,
+    ds_holdout: Optional[DeepLakeDataset] = None,
     holdout_label_index: Optional[Dict[int, np.ndarray]] = None,
     *,
-    splits=None,
+    splits: Optional[SplitIndices] = None,
     evaluate_test: bool = True,
     evaluate_holdout: bool = False,
     on_epoch_end: Callable[[str, Dict[str, float], int], None] | None = None,
     device: torch.device = DEVICE,
     output_dir: Path = RUNS_DIR,
 ) -> Tuple[nn.Module, pd.DataFrame, Dict[str, Any], Path]:
-    """
-    Train EfficientNet-B4 in two stages: head-only, then fine-tune.
-    
+    """Train EfficientNet-B4 in two stages: head-only, then fine-tune.
+
+    Stage 1 freezes the backbone and trains only the classification head.
+    Stage 2 unfreezes all layers for end-to-end fine-tuning.
+
     Args:
-        cfg: Training configuration
-        ds_train: Training dataset (will be split into train/val/test)
-        train_label_index: Label index for ds_train
-        ds_holdout: Optional holdout dataset (ONLY used when evaluate_holdout=True)
-        holdout_label_index: Optional label index for ds_holdout
-        splits: Optional precomputed train/val/test splits for ds_train
-        evaluate_test: Whether to evaluate the internal 15% test split at the end
-        evaluate_holdout: Whether to evaluate ds_holdout at the end (RUN ONCE at the very end)
-        device: Training device
-        output_dir: Directory to save checkpoints and logs
-    
+        cfg: Training configuration dataclass.
+        ds_train: DeepLake dataset for training (will be split internally).
+        train_label_index: Label index mapping class_id to dataset indices.
+        ds_holdout: Optional holdout dataset for final evaluation.
+        holdout_label_index: Label index for holdout dataset.
+        splits: Optional precomputed SplitIndices. If None, splits are computed.
+        evaluate_test: Whether to evaluate on internal test split. Defaults to True.
+        evaluate_holdout: Whether to evaluate on holdout set. Defaults to False.
+        on_epoch_end: Optional callback(stage, metrics, epoch) after each epoch.
+        device: Device for training. Defaults to best available.
+        output_dir: Directory for checkpoints and logs. Defaults to RUNS_DIR.
+
     Returns:
-        model: Trained model (best checkpoint)
-        history: DataFrame with training history
-        summary: Dict with final evaluation metrics
-        run_dir: Path to run directory
+        Tuple of (model, history_df, summary_dict, run_dir_path).
+
+    Raises:
+        FileNotFoundError: If resume_head_ckpt is specified but doesn't exist.
+        ValueError: If evaluate_holdout=True but ds_holdout is None.
     """
     seed_everything(cfg.seed)
-    
+
     # Setup output directory
     run_dir = output_dir / cfg.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Save configuration
     (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
-    
+
     # Class mapping
     class_ids = sorted(train_label_index.keys())
     class_id_to_idx = {cid: i for i, cid in enumerate(class_ids)}
     num_classes = len(class_ids)
-    
+
     # Create / reuse data splits (keep experiments comparable)
     if splits is None:
         splits = split_label_index_stratified(
@@ -1949,9 +2339,11 @@ def train_two_stage(
             test_frac=0.15,
             seed=cfg.seed,
         )
-    
-    print(f"Splits: train={len(splits.train_idx)}, val={len(splits.val_idx)}, test={len(splits.test_idx)}")
-    
+
+    print(
+        f"Splits: train={len(splits.train_idx)}, val={len(splits.val_idx)}, test={len(splits.test_idx)}"
+    )
+
     # Build model
     model, weights = build_efficientnet_b4(num_classes)
     model = model.to(device)
@@ -1967,7 +2359,9 @@ def train_two_stage(
             raise FileNotFoundError(f"resume_head_ckpt not found: {resume_path}")
         ckpt = torch.load(resume_path, map_location=device)
         if not isinstance(ckpt, dict) or "model_state" not in ckpt:
-            raise ValueError(f"Invalid head checkpoint (missing 'model_state'): {resume_path}")
+            raise ValueError(
+                f"Invalid head checkpoint (missing 'model_state'): {resume_path}"
+            )
         model.load_state_dict(ckpt["model_state"])
         resumed_from_head = True
 
@@ -1975,10 +2369,12 @@ def train_two_stage(
     train_aug = resolve_train_augmentation(cfg.augmentation, cfg.augmentation_params)
 
     cache_dir = Path(cfg.cache_dir) if cfg.cache_dir else None
-    
+
     # Create datasets
     train_ds = BirdDataset(
-        ds_train, splits.train_idx, splits.train_y,
+        ds_train,
+        splits.train_idx,
+        splits.train_y,
         weights=weights,
         preprocess_mode=cfg.preprocess_mode,
         bbox_padding_ratio=cfg.bbox_padding_ratio,
@@ -1988,7 +2384,9 @@ def train_two_stage(
         cache_version=cfg.cache_version,
     )
     val_ds = BirdDataset(
-        ds_train, splits.val_idx, splits.val_y,
+        ds_train,
+        splits.val_idx,
+        splits.val_y,
         weights=weights,
         preprocess_mode=cfg.preprocess_mode,
         bbox_padding_ratio=cfg.bbox_padding_ratio,
@@ -1998,7 +2396,9 @@ def train_two_stage(
         cache_version=cfg.cache_version,
     )
     test_ds = BirdDataset(
-        ds_train, splits.test_idx, splits.test_y,
+        ds_train,
+        splits.test_idx,
+        splits.test_y,
         weights=weights,
         preprocess_mode=cfg.preprocess_mode,
         bbox_padding_ratio=cfg.bbox_padding_ratio,
@@ -2008,19 +2408,29 @@ def train_two_stage(
         cache_dir=cache_dir,
         cache_version=cfg.cache_version,
     )
-    
+
     # Create dataloaders
     # Use num_workers=4 when caching is enabled (cached PNGs don't need DeepLake)
     num_workers = 4 if cache_dir is not None else 0
-    sampler = make_weighted_sampler(splits.train_y) if cfg.use_weighted_sampler else None
-    train_loader = make_dataloader(train_ds, cfg.batch_size, shuffle=True, sampler=sampler, num_workers=num_workers)
-    val_loader = make_dataloader(val_ds, cfg.batch_size, shuffle=False, num_workers=num_workers)
-    test_loader = make_dataloader(test_ds, cfg.batch_size, shuffle=False, num_workers=num_workers)
-    
+    sampler = (
+        make_weighted_sampler(splits.train_y) if cfg.use_weighted_sampler else None
+    )
+    train_loader = make_dataloader(
+        train_ds, cfg.batch_size, shuffle=True, sampler=sampler, num_workers=num_workers
+    )
+    val_loader = make_dataloader(
+        val_ds, cfg.batch_size, shuffle=False, num_workers=num_workers
+    )
+    test_loader = make_dataloader(
+        test_ds, cfg.batch_size, shuffle=False, num_workers=num_workers
+    )
+
     holdout_loader = None
     if evaluate_holdout:
         if ds_holdout is None or holdout_label_index is None:
-            raise ValueError("evaluate_holdout=True requires ds_holdout and holdout_label_index")
+            raise ValueError(
+                "evaluate_holdout=True requires ds_holdout and holdout_label_index"
+            )
         holdout_indices, holdout_labels = [], []
         for class_id, idxs in holdout_label_index.items():
             if class_id not in class_id_to_idx:
@@ -2040,13 +2450,15 @@ def train_two_stage(
             cache_dir=cache_dir,
             cache_version=cfg.cache_version,
         )
-        holdout_loader = make_dataloader(holdout_ds, cfg.batch_size, shuffle=False, num_workers=num_workers)
-    
+        holdout_loader = make_dataloader(
+            holdout_ds, cfg.batch_size, shuffle=False, num_workers=num_workers
+        )
+
     # Loss function
     criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
-    
+
     history = []
-    
+
     # ==========================================================================
     # NESTED FUNCTION: run_stage
     # ==========================================================================
@@ -2061,24 +2473,30 @@ def train_two_stage(
         best_f1 = -1.0
         best_path = run_dir / f"best_{stage_name}.pt"
         no_improve = 0
-        
+
         # Epoch-level progress bar with time estimates
-        epoch_pbar = tqdm(range(1, epochs + 1), desc=f"Stage: {stage_name}", unit="epoch")
-        
+        epoch_pbar = tqdm(
+            range(1, epochs + 1), desc=f"Stage: {stage_name}", unit="epoch"
+        )
+
         for ep in epoch_pbar:
             t0 = time.time()
-            
+
             # Train
             train_metrics = train_one_epoch(
-                model, train_loader, device, criterion, optimizer,
+                model,
+                train_loader,
+                device,
+                criterion,
+                optimizer,
                 use_amp=cfg.use_amp,
                 grad_clip_norm=cfg.grad_clip_norm,
                 freeze_bn=freeze_bn,
             )
-            
+
             # Validate
             val_metrics = evaluate(model, val_loader, device, criterion)
-            
+
             # Log
             elapsed = time.time() - t0
             row = {
@@ -2098,39 +2516,46 @@ def train_two_stage(
                 "seconds": elapsed,
             }
             history.append(row)
-            
+
             # Update progress bar with metrics
-            epoch_pbar.set_postfix({
-                "val_f1": f"{val_metrics['f1']:.3f}",
-                "val_loss": f"{val_metrics['loss']:.3f}",
-                "best_f1": f"{max(best_f1, val_metrics['f1']):.3f}",
-            })
+            epoch_pbar.set_postfix(
+                {
+                    "val_f1": f"{val_metrics['f1']:.3f}",
+                    "val_loss": f"{val_metrics['loss']:.3f}",
+                    "best_f1": f"{max(best_f1, val_metrics['f1']):.3f}",
+                }
+            )
 
             if on_epoch_end is not None:
                 on_epoch_end(stage_name, val_metrics, epoch_offset + ep)
-            
+
             # Checkpoint
             if val_metrics["f1"] > best_f1:
                 best_f1 = val_metrics["f1"]
                 no_improve = 0
-                torch.save({
-                    "model_state": model.state_dict(),
-                    "class_ids": class_ids,
-                    "class_id_to_idx": class_id_to_idx,
-                    "epoch": epoch_offset + ep,
-                    "val_f1": best_f1,
-                    "config": asdict(cfg),
-                }, best_path)
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "class_ids": class_ids,
+                        "class_id_to_idx": class_id_to_idx,
+                        "epoch": epoch_offset + ep,
+                        "val_f1": best_f1,
+                        "config": asdict(cfg),
+                    },
+                    best_path,
+                )
             else:
                 no_improve += 1
-            
+
             # Early stopping
             if cfg.early_stop_patience > 0 and no_improve >= cfg.early_stop_patience:
-                print(f"  Early stopping triggered (no improvement for {cfg.early_stop_patience} epochs)")
+                print(
+                    f"  Early stopping triggered (no improvement for {cfg.early_stop_patience} epochs)"
+                )
                 break
-        
+
         return best_path
-    
+
     # ==========================================================================
     # STAGE 1: Head Training (Frozen Backbone)
     # ==========================================================================
@@ -2164,14 +2589,16 @@ def train_two_stage(
         )
 
         # Load best head checkpoint
-        model.load_state_dict(torch.load(best_head_path, map_location=device)["model_state"])
+        model.load_state_dict(
+            torch.load(best_head_path, map_location=device)["model_state"]
+        )
         finetune_epoch_offset = cfg.head_epochs
     else:
         print(f"\n{'='*60}")
         print("STAGE 1: Skipped (head_epochs=0)")
         print(f"{'='*60}")
         finetune_epoch_offset = 0
-    
+
     # ==========================================================================
     # STAGE 2: Fine-tuning (All Layers) — only if finetune_epochs > 0
     # ==========================================================================
@@ -2179,44 +2606,54 @@ def train_two_stage(
         print(f"\n{'='*60}")
         print("STAGE 2: Fine-tuning All Layers")
         print(f"{'='*60}")
-        
+
         unfreeze_all(model)
-        
+
         # Different learning rates for backbone vs head
         head_params = list(model.classifier.parameters())
         head_param_ids = {id(p) for p in head_params}
         backbone_params = [p for p in model.parameters() if id(p) not in head_param_ids]
-        
-        optimizer_finetune = torch.optim.AdamW([
-            {"params": backbone_params, "lr": cfg.lr_backbone},
-            {"params": head_params, "lr": cfg.lr_head_finetune},
-        ], weight_decay=cfg.weight_decay)
-        
-        best_finetune_path = run_stage(
-            "finetune", cfg.finetune_epochs, optimizer_finetune,
-            freeze_bn=cfg.freeze_bn_finetune, epoch_offset=finetune_epoch_offset
+
+        optimizer_finetune = torch.optim.AdamW(
+            [
+                {"params": backbone_params, "lr": cfg.lr_backbone},
+                {"params": head_params, "lr": cfg.lr_head_finetune},
+            ],
+            weight_decay=cfg.weight_decay,
         )
-        
+
+        best_finetune_path = run_stage(
+            "finetune",
+            cfg.finetune_epochs,
+            optimizer_finetune,
+            freeze_bn=cfg.freeze_bn_finetune,
+            epoch_offset=finetune_epoch_offset,
+        )
+
         # Load best fine-tuned checkpoint
-        model.load_state_dict(torch.load(best_finetune_path, map_location=device)["model_state"])
+        model.load_state_dict(
+            torch.load(best_finetune_path, map_location=device)["model_state"]
+        )
     else:
         print(f"\n{'='*60}")
         print("STAGE 2: Skipped (finetune_epochs=0)")
         print(f"{'='*60}")
-    
+
     # ==========================================================================
     # FINAL EVALUATION
     # ==========================================================================
     print(f"\n{'='*60}")
     print("FINAL EVALUATION")
     print(f"{'='*60}")
-    
+
     test_metrics = None
     test_y_true, test_y_pred = None, None
     test_indices = None
     holdout_indices = None
     if evaluate_test:
-        test_metrics, test_y_true, test_y_pred, test_indices = evaluate_with_preds(model, test_loader, device, criterion)
+        test_metrics, test_y_true, test_y_pred, test_indices = evaluate_with_preds(
+            model, test_loader, device, criterion
+        )
         (run_dir / "test_classification_report.txt").write_text(
             classification_report(
                 test_y_true,
@@ -2228,7 +2665,11 @@ def train_two_stage(
             )
         )
         rep = classification_report(
-            test_y_true, test_y_pred, labels=list(range(num_classes)), output_dict=True, zero_division=0
+            test_y_true,
+            test_y_pred,
+            labels=list(range(num_classes)),
+            output_dict=True,
+            zero_division=0,
         )
         test_metrics["weighted_precision"] = float(rep["weighted avg"]["precision"])
         test_metrics["weighted_recall"] = float(rep["weighted avg"]["recall"])
@@ -2242,12 +2683,12 @@ def train_two_stage(
         print(f"  Macro Recall:     {test_metrics['recall']:.4f}")
         print(f"  Macro F1:         {test_metrics['f1']:.4f}")
         print(f"  Weighted F1:      {test_metrics['weighted_f1']:.4f}")
-    
+
     holdout_metrics = None
     holdout_y_true, holdout_y_pred = None, None
     if evaluate_holdout:
-        holdout_metrics, holdout_y_true, holdout_y_pred, holdout_indices = evaluate_with_preds(
-            model, holdout_loader, device, criterion
+        holdout_metrics, holdout_y_true, holdout_y_pred, holdout_indices = (
+            evaluate_with_preds(model, holdout_loader, device, criterion)
         )
         (run_dir / "holdout_classification_report.txt").write_text(
             classification_report(
@@ -2260,7 +2701,11 @@ def train_two_stage(
             )
         )
         rep = classification_report(
-            holdout_y_true, holdout_y_pred, labels=list(range(num_classes)), output_dict=True, zero_division=0
+            holdout_y_true,
+            holdout_y_pred,
+            labels=list(range(num_classes)),
+            output_dict=True,
+            zero_division=0,
         )
         holdout_metrics["weighted_precision"] = float(rep["weighted avg"]["precision"])
         holdout_metrics["weighted_recall"] = float(rep["weighted avg"]["recall"])
@@ -2274,11 +2719,11 @@ def train_two_stage(
         print(f"  Macro Recall:     {holdout_metrics['recall']:.4f}")
         print(f"  Macro F1:         {holdout_metrics['f1']:.4f}")
         print(f"  Weighted F1:      {holdout_metrics['weighted_f1']:.4f}")
-    
+
     # Save results
     history_df = pd.DataFrame(history)
     history_df.to_csv(run_dir / "history.csv", index=False)
-    
+
     summary = {
         "test": test_metrics,
         "holdout": holdout_metrics,
@@ -2291,131 +2736,210 @@ def train_two_stage(
         "holdout_y_pred": holdout_y_pred,
         "holdout_indices": holdout_indices if evaluate_holdout else None,
     }
-    (run_dir / "summary.json").write_text(json.dumps({
-        "test": test_metrics,
-        "holdout": holdout_metrics,
-        "val_best_f1": float(history_df["val_f1"].max()),
-    }, indent=2))
-    
+    (run_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "test": test_metrics,
+                "holdout": holdout_metrics,
+                "val_best_f1": float(history_df["val_f1"].max()),
+            },
+            indent=2,
+        )
+    )
+
     print(f"\nResults saved to: {run_dir}")
-    
+
     return model, history_df, summary, run_dir
 
 
-
-
-
-
 def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
-    """
-    Plot comprehensive training curves from history DataFrame.
-    
+    """Plot comprehensive training curves from history DataFrame.
+
     Shows 4 subplots:
     1. Loss (train vs val)
-    2. Accuracy (train vs val) 
+    2. Accuracy (train vs val)
     3. F1 Score (train vs val)
     4. All validation metrics combined
-    
+
     A vertical dashed line marks the transition from Stage 1 (head) to Stage 2 (finetune).
+
+    Args:
+        history_df: DataFrame with columns including 'global_epoch', 'stage',
+            'train_loss', 'val_loss', 'train_acc', 'val_acc', 'train_f1', 'val_f1'.
+        run_name: Optional experiment name to include in the plot title.
     """
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     axes = axes.flatten()
-    
+
     epochs = history_df["global_epoch"]
-    
+
     # Find stage boundary for vertical line
     head_epochs = history_df[history_df["stage"] == "head"]["global_epoch"].max()
-    
+
     # Color scheme
     train_color = "#2ecc71"  # Green
-    val_color = "#e74c3c"    # Red
-    
+    val_color = "#e74c3c"  # Red
+
     # =========================================================================
     # Plot 1: Loss
     # =========================================================================
     ax = axes[0]
-    ax.plot(epochs, history_df["train_loss"], label="Train Loss", 
-            color=train_color, marker="o", markersize=5, linewidth=2)
-    ax.plot(epochs, history_df["val_loss"], label="Val Loss", 
-            color=val_color, marker="s", markersize=5, linewidth=2)
-    ax.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
+    ax.plot(
+        epochs,
+        history_df["train_loss"],
+        label="Train Loss",
+        color=train_color,
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_loss"],
+        label="Val Loss",
+        color=val_color,
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
     ax.set_xlabel("Epoch", fontsize=10)
     ax.set_ylabel("Loss", fontsize=10)
     ax.set_title("Loss", fontsize=12, fontweight="bold")
     ax.legend(loc="upper right", fontsize=9)
     ax.grid(True, alpha=0.3)
-    
+
     # Add stage labels
-    ax.text(head_epochs / 2, ax.get_ylim()[1] * 0.95, "Head", ha="center", fontsize=9, alpha=0.7)
-    ax.text(head_epochs + (epochs.max() - head_epochs) / 2, ax.get_ylim()[1] * 0.95, 
-            "Finetune", ha="center", fontsize=9, alpha=0.7)
-    
+    ax.text(
+        head_epochs / 2,
+        ax.get_ylim()[1] * 0.95,
+        "Head",
+        ha="center",
+        fontsize=9,
+        alpha=0.7,
+    )
+    ax.text(
+        head_epochs + (epochs.max() - head_epochs) / 2,
+        ax.get_ylim()[1] * 0.95,
+        "Finetune",
+        ha="center",
+        fontsize=9,
+        alpha=0.7,
+    )
+
     # =========================================================================
     # Plot 2: Accuracy
     # =========================================================================
     ax = axes[1]
-    ax.plot(epochs, history_df["train_acc"], label="Train Accuracy", 
-            color=train_color, marker="o", markersize=5, linewidth=2)
-    ax.plot(epochs, history_df["val_acc"], label="Val Accuracy", 
-            color=val_color, marker="s", markersize=5, linewidth=2)
-    ax.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
+    ax.plot(
+        epochs,
+        history_df["train_acc"],
+        label="Train Accuracy",
+        color=train_color,
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_acc"],
+        label="Val Accuracy",
+        color=val_color,
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
     ax.set_xlabel("Epoch", fontsize=10)
     ax.set_ylabel("Accuracy", fontsize=10)
     ax.set_title("Accuracy", fontsize=12, fontweight="bold")
     ax.legend(loc="lower right", fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
-    
+
     # =========================================================================
     # Plot 3: F1 Score
     # =========================================================================
     ax = axes[2]
-    ax.plot(epochs, history_df["train_f1"], label="Train F1", 
-            color=train_color, marker="o", markersize=5, linewidth=2)
-    ax.plot(epochs, history_df["val_f1"], label="Val F1", 
-            color=val_color, marker="s", markersize=5, linewidth=2)
-    ax.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
+    ax.plot(
+        epochs,
+        history_df["train_f1"],
+        label="Train F1",
+        color=train_color,
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_f1"],
+        label="Val F1",
+        color=val_color,
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
     ax.set_xlabel("Epoch", fontsize=10)
     ax.set_ylabel("Macro F1 Score", fontsize=10)
     ax.set_title("F1 Score (Macro)", fontsize=12, fontweight="bold")
     ax.legend(loc="lower right", fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
-    
+
     # =========================================================================
     # Plot 4: All Validation Metrics Combined
     # =========================================================================
     ax = axes[3]
-    ax.plot(epochs, history_df["val_acc"], label="Val Accuracy", 
-            color="#3498db", marker="o", markersize=5, linewidth=2)
-    ax.plot(epochs, history_df["val_f1"], label="Val F1", 
-            color="#e74c3c", marker="s", markersize=5, linewidth=2)
-    ax.axvline(x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5)
+    ax.plot(
+        epochs,
+        history_df["val_acc"],
+        label="Val Accuracy",
+        color="#3498db",
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_f1"],
+        label="Val F1",
+        color="#e74c3c",
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
     ax.set_xlabel("Epoch", fontsize=10)
     ax.set_ylabel("Score", fontsize=10)
     ax.set_title("Validation Metrics Overview", fontsize=12, fontweight="bold")
     ax.legend(loc="lower right", fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
-    
+
     # Highlight best epoch
     best_epoch = history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"]
     best_f1 = history_df["val_f1"].max()
-    ax.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
+    #ax.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
     ax.scatter([best_epoch], [best_f1], color="#9b59b6", s=100, zorder=5, marker="*")
-    ax.annotate(f"Best: {best_f1:.3f}", xy=(best_epoch, best_f1), 
-                xytext=(best_epoch + 0.5, best_f1 - 0.05),
-                fontsize=9, color="#9b59b6")
-    
+
     # Main title
     title = "Training History"
     if run_name:
         title += f" — {run_name}"
     fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
-    
+
     plt.tight_layout()
     plt.show()
-    
+
     # Print summary statistics
     print("\nTraining Summary:")
     print(f"   Best Val F1: {history_df['val_f1'].max():.4f} (epoch {int(best_epoch)})")
@@ -2424,34 +2948,41 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     print(f"   Final Val Loss: {history_df['val_loss'].iloc[-1]:.4f}")
 
 
-
-
-
 # =============================================================================
 # EXPERIMENT RUNNER (simple, repeatable experiments)
 # =============================================================================
 
 
-
 def make_experiment_runner(
     *,
-    ds_train,
+    ds_train: DeepLakeDataset,
     train_label_index: Dict[int, np.ndarray],
-    splits,
-    ds_holdout=None,
+    splits: SplitIndices,
+    ds_holdout: Optional[DeepLakeDataset] = None,
     holdout_label_index: Optional[Dict[int, np.ndarray]] = None,
-    output_dir: Path = None,
-):
-    """Create a tiny runner so you can launch experiments with 1 line.
+    output_dir: Optional[Path] = None,
+) -> SimpleNamespace:
+    """Create an experiment runner for launching training experiments.
 
-    Rules enforced by default:
-      - Uses the SAME `splits` for every run (fair comparisons).
-      - Uses ONLY internal val/test from `ds_train` during experiments.
-      - Holdout (`ds_val`) is only used when you explicitly call `final_holdout(...)`.
-    
+    Provides a simple interface for running multiple experiments with consistent
+    data splits for fair comparisons.
+
+    Rules enforced:
+    - Uses the SAME splits for every run (fair comparisons)
+    - Uses ONLY internal val/test from ds_train during experiments
+    - Holdout is only used via explicit final_holdout() call
+
     Args:
-        output_dir: Directory for saving experiment results. Defaults to RUNS_DIR.
-                    Pass a Google Drive path in Colab for persistence.
+        ds_train: DeepLake training dataset.
+        train_label_index: Label index for training data.
+        splits: Precomputed train/val/test splits.
+        ds_holdout: Optional holdout dataset for final evaluation.
+        holdout_label_index: Label index for holdout dataset.
+        output_dir: Directory for results. Defaults to RUNS_DIR.
+
+    Returns:
+        SimpleNamespace with methods: run(), run_or_load(), run_many(),
+        df(), reset(), load_cached(), load_all_cached(), final_holdout().
     """
     # Use provided output_dir or fall back to default RUNS_DIR
     runs_dir = output_dir if output_dir is not None else RUNS_DIR
@@ -2459,7 +2990,7 @@ def make_experiment_runner(
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     results: List[Dict[str, Any]] = []
-    
+
     # Build id_to_name mapping from dataset metadata
     id_to_name: Dict[int, str] | None = None
     try:
@@ -2572,19 +3103,19 @@ def make_experiment_runner(
     def load_cached(run_name: str, plot: bool = False) -> Optional[Dict[str, Any]]:
         """
         Load a previously completed experiment from disk and add to results.
-        
+
         Returns the result dict if found, None otherwise.
         Use this to restore experiments from previous sessions.
         """
         saved = load_experiment_results(run_name, runs_dir=runs_dir)
         if saved is None:
             return None
-        
+
         config = saved["config"]
         summary = saved["summary"]
         history_df = saved["history_df"]
         test = summary.get("test") or {}
-        
+
         row = {
             "run_name": run_name,
             "preprocess_mode": config.get("preprocess_mode"),
@@ -2603,11 +3134,13 @@ def make_experiment_runner(
             "run_dir": str(saved["run_dir"]),
         }
         results.append(row)
-        
+
         if plot:
             plot_training_history(history_df, run_name=run_name)
-        
-        print(f"  Loaded cached experiment: {run_name} (val_f1={summary.get('val_best_f1', 0):.4f})")
+
+        print(
+            f"  Loaded cached experiment: {run_name} (val_f1={summary.get('val_best_f1', 0):.4f})"
+        )
         return row
 
     def run_or_load(
@@ -2620,19 +3153,19 @@ def make_experiment_runner(
     ):
         """
         Run experiment OR load from cache if already completed.
-        
+
         This is the recommended method for resumable experiments:
         - Checks if experiment already exists on disk
         - If exists: loads results and skips training
         - If not exists: runs training normally
-        
+
         Args:
             run_name: Experiment name
             plot: Whether to show plots
             evaluate_test: Whether to evaluate on test set
             force_retrain: If True, always retrain even if cached
             **cfg_overrides: Training config overrides
-        
+
         Returns:
             Same as run(): (row, history_df, summary, run_dir)
         """
@@ -2642,30 +3175,30 @@ def make_experiment_runner(
             if row is not None:
                 saved = load_experiment_results(run_name, runs_dir=runs_dir)
                 return row, saved["history_df"], saved["summary"], saved["run_dir"]
-        
+
         # Run training
         return run(run_name, plot=plot, evaluate_test=evaluate_test, **cfg_overrides)
 
     def load_all_cached(run_names: List[str] = None, plot: bool = False) -> int:
         """
         Load multiple cached experiments at once.
-        
+
         Args:
             run_names: List of experiment names to load. If None, loads all
                        completed experiments found in runs_dir.
             plot: Whether to show plots for each loaded experiment
-        
+
         Returns:
             Number of experiments successfully loaded
         """
         if run_names is None:
             run_names = get_completed_experiments(runs_dir=runs_dir)
-        
+
         loaded = 0
         for name in run_names:
             if load_cached(name, plot=plot) is not None:
                 loaded += 1
-        
+
         return loaded
 
     def final_holdout(
@@ -2683,7 +3216,7 @@ def make_experiment_runner(
         holdout_index = holdout_label_index
         val_clean_path = Path("label_index_val_clean.npz")
         holdout_index_path = Path("label_index_holdout.npz")
-        
+
         if holdout_index is None:
             if val_clean_path.exists():
                 holdout_index = load_label_index(val_clean_path)
@@ -2694,7 +3227,6 @@ def make_experiment_runner(
             else:
                 holdout_index = build_label_index(ds_holdout)
                 save_label_index(holdout_index, holdout_index_path)
-
 
         cfg_kwargs = {**BASELINE_CONFIG, **cfg_overrides}
         cfg = TrainConfig(run_name=run_name, **cfg_kwargs)
