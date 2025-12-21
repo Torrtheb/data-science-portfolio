@@ -904,18 +904,26 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
     if p_flip > 0:
         ops.append(A.HorizontalFlip(p=min(max(p_flip, 0.0), 1.0)))
 
-    # ShiftScaleRotate: p_affine or p_rotate
+    # Affine (replaces deprecated ShiftScaleRotate): p_affine or p_rotate
     p_affine = _p("p_affine", "p_rotate")
     if p_affine > 0:
         shift_limit = _f("shift_limit", default=0.0)
         scale_limit = _f("scale_limit", default=0.0)
         rotate_limit = _f("rotate_limit", default=0.0)
+        # Convert ShiftScaleRotate-style limits to Affine-style ranges
+        # scale_limit=0.15 means scale in [1-0.15, 1+0.15] = [0.85, 1.15]
+        # rotate_limit=20 means rotate in [-20, 20]
         ops.append(
-            A.ShiftScaleRotate(
-                shift_limit=shift_limit,
-                scale_limit=scale_limit,
-                rotate_limit=rotate_limit,
-                border_mode=cv2.BORDER_REFLECT_101,
+            A.Affine(
+                translate_percent=(
+                    {"x": (-shift_limit, shift_limit), "y": (-shift_limit, shift_limit)}
+                    if shift_limit > 0
+                    else None
+                ),
+                scale=(1 - scale_limit, 1 + scale_limit) if scale_limit > 0 else None,
+                rotate=(-rotate_limit, rotate_limit) if rotate_limit > 0 else None,
+                shear=None,
+                mode=cv2.BORDER_REFLECT_101,
                 p=min(max(p_affine, 0.0), 1.0),
             )
         )
