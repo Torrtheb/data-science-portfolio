@@ -853,7 +853,11 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
     p_noise = _p("p_noise", 0.0)
     if p_noise > 0:
         std_max = float(params.get("noise_std_max", 20.0))
-        std_max = max(1.0, std_max)
+        # Normalize to [0, 1] range - albumentations expects std as fraction of pixel range
+        # If value > 1, assume it's in 0-255 scale and convert
+        if std_max > 1.0:
+            std_max = std_max / 255.0
+        std_max = min(max(std_max, 0.0), 1.0)  # Clamp to valid range
         ops.append(A.GaussNoise(std_range=(0.0, std_max), p=min(max(p_noise, 0.0), 1.0)))
 
     p_dropout = _p("p_dropout", 0.0)
