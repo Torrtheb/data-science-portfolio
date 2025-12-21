@@ -2,9 +2,12 @@ from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple, Optional, Any, Callable, Mapping
 from pathlib import Path
 import json
+import multiprocessing
 import os
-import sys
+import platform
 import random
+import shutil
+import sys
 import time
 from collections import defaultdict
 
@@ -199,8 +202,6 @@ def export_experiments_for_github(
     Returns:
         Dict mapping run_name -> success status
     """
-    import shutil
-    
     runs_dir = runs_dir or RUNS_DIR
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -240,75 +241,6 @@ def export_experiments_for_github(
         except Exception as e:
             print(f"  Failed '{run_name}': {e}")
             status[run_name] = False
-    
-    return status
-
-
-def download_experiments_from_github(
-    github_raw_base_url: str,
-    run_names: List[str],
-    runs_dir: Path = None,
-    force: bool = False,
-) -> Dict[str, bool]:
-    """
-    Download experiment results from GitHub raw URLs.
-    
-    This allows resuming experiments in Colab without re-training by
-    downloading previously saved results from GitHub.
-    
-    Args:
-        github_raw_base_url: Base URL for raw GitHub files 
-            (e.g., 'https://raw.githubusercontent.com/user/repo/branch/bird_classifier/runs')
-        run_names: List of experiment names to download
-        runs_dir: Local runs directory (default: RUNS_DIR)
-        force: If True, overwrite existing files
-    
-    Returns:
-        Dict mapping run_name -> success status
-    """
-    import urllib.request
-    import urllib.error
-    
-    runs_dir = runs_dir or RUNS_DIR
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    
-    files_to_download = ["config.json", "history.csv", "summary.json"]
-    status = {}
-    
-    for run_name in run_names:
-        run_dir = runs_dir / run_name
-        
-        # Skip if already exists and not forcing
-        if not force and check_experiment_exists(run_name, runs_dir):
-            print(f"  '{run_name}': already exists (use force=True to overwrite)")
-            status[run_name] = True
-            continue
-        
-        run_dir.mkdir(parents=True, exist_ok=True)
-        success = True
-        
-        for filename in files_to_download:
-            url = f"{github_raw_base_url}/{run_name}/{filename}"
-            dest = run_dir / filename
-            
-            try:
-                urllib.request.urlretrieve(url, str(dest))
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    # File not found - might be optional (like classification reports)
-                    if filename in ["config.json", "history.csv", "summary.json"]:
-                        success = False
-                        print(f"  '{run_name}': missing required file {filename}")
-                else:
-                    success = False
-                    print(f"  '{run_name}': HTTP error downloading {filename}: {e}")
-            except Exception as e:
-                success = False
-                print(f"  '{run_name}': error downloading {filename}: {e}")
-        
-        if success:
-            print(f"  Downloaded '{run_name}'")
-        status[run_name] = success
     
     return status
 
@@ -612,24 +544,6 @@ def resolve_bbox_from_box_array(
     return x1, y1, x2, y2
 
 
-def resolve_bbox_xywh_or_xyxy(ds, idx: int) -> Optional[Tuple[float, float, float, float]]:
-    """
-    Legacy wrapper - loads image to get dimensions.
-    DEPRECATED: Prefer resolve_bbox_from_box_array() when image is already loaded.
-    
-    This function loads the image from the dataset, which is wasteful if
-    the image is already loaded elsewhere. Use resolve_bbox_from_box_array()
-    with the image dimensions instead.
-    """
-    try:
-        img = ds["images"][idx].numpy()
-        h, w = img.shape[:2]
-        box = ds["boxes"][idx].numpy()
-    except Exception:
-        return None
-    return resolve_bbox_from_box_array(box, h, w)
-
-
 def apply_bbox_crop_optimized(
     img: np.ndarray, 
     box: np.ndarray, 
@@ -691,21 +605,6 @@ def apply_bbox_crop_optimized(
         )
 
     return cropped
-
-
-def apply_bbox_crop(img: np.ndarray, ds, idx: int, padding_ratio: float = 0.15) -> np.ndarray:
-    """
-    Legacy wrapper for backward compatibility.
-    DEPRECATED: Use apply_bbox_crop_optimized() with pre-loaded box array.
-    
-    Note: This still loads the box from ds, but avoids double image loading
-    since img is already passed in.
-    """
-    try:
-        box = ds["boxes"][idx].numpy()
-    except Exception:
-        return img
-    return apply_bbox_crop_optimized(img, box, padding_ratio)
 
 
 # =============================================================================
@@ -1221,18 +1120,10 @@ def make_dataloader(
         num_workers: Number of worker processes. Use 0 for DeepLake without caching,
                      or 4 when using cached PNG files for ~3x speedup.
     """
-    import sys
-    import platform
-    
-    # Use spawn context on Linux (Colab) to avoid fork-related multiprocessing errors
-    # The "can only test a child process" assertion error occurs with fork + notebooks
     mp_context = None
     if num_workers > 0 and platform.system() == "Linux":
-        import multiprocessing
         mp_context = multiprocessing.get_context("spawn")
     
-    # Note: persistent_workers can cause "Bad file descriptor" errors on cleanup,
-    # so we disable it. The slight performance hit is worth the stability.
     return DataLoader(
         dataset,
         batch_size=max(1, int(batch_size)),
@@ -1240,8 +1131,8 @@ def make_dataloader(
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=False,  # Disabled to avoid OSError on cleanup
-        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch for speed
+        persistent_workers=False,
+        prefetch_factor=2 if num_workers > 0 else None,
         multiprocessing_context=mp_context,
     )
 
