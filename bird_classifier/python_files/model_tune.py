@@ -21,7 +21,9 @@ from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
 import torchvision.models as models
 
 # Metrics
@@ -88,7 +90,61 @@ BASELINE_CONFIG = dict(
     cache_version="v1_uint8_rgb_pad_bbox",
     early_stop_patience=3,  # Stop if no improvement for 3 epochs (0 = disabled)
     seed=42,
+    # New hyperparameters for Phase 2 tuning
+    optimizer="adamw",  # 'adamw' or 'sgd'
+    momentum=0.9,  # For SGD optimizer
+    loss_fn="cross_entropy",  # 'cross_entropy', 'focal', or 'label_smoothing'
+    focal_gamma=2.0,  # Gamma for focal loss
+    scheduler="none",  # 'none', 'cosine', or 'onecycle'
+    dropout=0.4,  # Dropout rate for classifier head
 )
+
+
+# =============================================================================
+# FOCAL LOSS (for class imbalance)
+# =============================================================================
+
+
+class FocalLoss(nn.Module):
+    """Focal Loss for handling class imbalance.
+
+    Focal loss down-weights well-classified examples and focuses on hard,
+    misclassified examples. Particularly useful for datasets with many classes
+    where some classes have very few samples.
+
+    Reference: Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017
+
+    Args:
+        gamma: Focusing parameter. Higher values give more weight to hard examples.
+               gamma=0 is equivalent to cross-entropy. Typical values: 1.0-3.0
+        alpha: Optional class weights (not used in this implementation).
+        reduction: 'mean' or 'sum' or 'none'
+    """
+
+    def __init__(self, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute focal loss.
+
+        Args:
+            inputs: Logits of shape (N, C) where C is number of classes
+            targets: Ground truth labels of shape (N,)
+
+        Returns:
+            Focal loss value
+        """
+        ce_loss = F.cross_entropy(inputs, targets, reduction="none")
+        pt = torch.exp(-ce_loss)  # pt = p if correct class
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        return focal_loss
 
 
 def seed_everything(seed: int) -> None:
@@ -864,21 +920,63 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
             )
         )
 
-    # ColorJitter: p_color or p_brightness_contrast or p_hue_sat
-    p_color = _p("p_color", "p_brightness_contrast", "p_hue_sat")
-    if p_color > 0:
+    # ColorJitter: Support separate probabilities for brightness/contrast vs hue/sat
+    # or a combined p_color for backwards compatibility
+    p_brightness_contrast = _p("p_brightness_contrast")
+    p_hue_sat = _p("p_hue_sat")
+    p_color = _p("p_color")  # Combined fallback
+
+    # If separate probabilities are specified, create two separate ColorJitter transforms
+    if p_brightness_contrast > 0 or p_hue_sat > 0:
+        # Brightness/Contrast only
+        if p_brightness_contrast > 0:
+            brightness = _f("brightness", "brightness_limit", default=0.1)
+            contrast = _f("contrast", "contrast_limit", default=0.1)
+            ops.append(
+                A.ColorJitter(
+                    brightness=brightness,
+                    contrast=contrast,
+                    saturation=0.0,
+                    hue=0.0,
+                    p=min(max(p_brightness_contrast, 0.0), 1.0),
+                )
+            )
+
+        # Hue/Saturation only
+        if p_hue_sat > 0:
+            # hue_shift is typically int (e.g., 5-20), scale to 0-0.5 range
+            hue = _f("hue", default=0.0)
+            if hue == 0.0:
+                hue_shift = _i("hue_shift", default=10)
+                hue = min(hue_shift / 180.0, 0.5)  # Convert degrees to fraction
+            # sat_shift might be int (10-30), convert to fraction if needed
+            saturation = _f("saturation", default=0.0)
+            if saturation == 0.0:
+                sat_shift = _i("sat_shift", default=15)
+                saturation = sat_shift / 100.0  # Convert percentage to fraction
+            elif saturation > 1.0:
+                saturation = saturation / 100.0
+            ops.append(
+                A.ColorJitter(
+                    brightness=0.0,
+                    contrast=0.0,
+                    saturation=saturation,
+                    hue=hue,
+                    p=min(max(p_hue_sat, 0.0), 1.0),
+                )
+            )
+    elif p_color > 0:
+        # Combined ColorJitter (backwards compatibility)
         brightness = _f("brightness", "brightness_limit", default=0.0)
         contrast = _f("contrast", "contrast_limit", default=0.0)
         saturation = _f("saturation", "sat_shift", default=0.0)
-        # hue_shift is typically int (e.g., 5-20), scale to 0-0.5 range for ColorJitter
         hue = _f("hue", default=0.0)
         if hue == 0.0:
             hue_shift = _i("hue_shift", default=0)
             if hue_shift > 0:
-                hue = min(hue_shift / 180.0, 0.5)  # Convert degrees to fraction
-        # sat_shift might be int (10-30), convert to fraction if needed
+                hue = min(hue_shift / 180.0, 0.5)
         if saturation > 1.0:
-            saturation = saturation / 100.0  # Convert percentage to fraction
+            saturation = saturation / 100.0
         ops.append(
             A.ColorJitter(
                 brightness=brightness,
@@ -1189,15 +1287,18 @@ class BirdDataset(Dataset):
 # =============================================================================
 
 
-def build_efficientnet_b4(num_classes: int) -> Tuple[nn.Module, EfficientNetWeights]:
+def build_efficientnet_b4(
+    num_classes: int, dropout: float = 0.4
+) -> Tuple[nn.Module, EfficientNetWeights]:
     """Build EfficientNet-B4 with a new classification head.
 
     Architecture:
     - Backbone: EfficientNet-B4 pretrained on ImageNet
-    - Classifier: Dropout(0.4) → Linear(1792 → num_classes)
+    - Classifier: Dropout(dropout) → Linear(1792 → num_classes)
 
     Args:
         num_classes: Number of output classes for the classifier.
+        dropout: Dropout rate for the classifier head (0.0-1.0).
 
     Returns:
         Tuple of (model, weights) where weights contains preprocessing transforms.
@@ -1205,9 +1306,12 @@ def build_efficientnet_b4(num_classes: int) -> Tuple[nn.Module, EfficientNetWeig
     weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
     model = models.efficientnet_b4(weights=weights)
 
-    # Replace classifier (original: Linear(1792 → 1000))
+    # Replace classifier (original: Dropout(0.4) → Linear(1792 → 1000))
     in_features = model.classifier[-1].in_features  # 1792
-    model.classifier[-1] = nn.Linear(in_features, num_classes)
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=dropout, inplace=True),
+        nn.Linear(in_features, num_classes),
+    )
 
     return model, weights
 
@@ -2229,6 +2333,22 @@ class TrainConfig:
     weight_decay: float = 1e-4
     label_smoothing: float = 0.0
 
+    # Optimizer settings
+    optimizer: str = "adamw"  # 'adamw' or 'sgd'
+    momentum: float = 0.9  # For SGD optimizer
+
+    # Loss function settings
+    loss_fn: str = "cross_entropy"  # 'cross_entropy', 'focal', or 'label_smoothing'
+    focal_gamma: float = (
+        2.0  # Gamma for focal loss (higher = more focus on hard examples)
+    )
+
+    # Learning rate scheduler
+    scheduler: str = "none"  # 'none', 'cosine', or 'onecycle'
+
+    # Model architecture
+    dropout: float = 0.4  # Dropout rate for classifier head
+
     # Training options
     use_weighted_sampler: bool = True
     use_amp: bool = True
@@ -2254,6 +2374,20 @@ class TrainConfig:
             raise ValueError(
                 f"preprocess_mode must be 'native' or 'bbox_crop', got '{self.preprocess_mode}'"
             )
+        if self.optimizer not in {"adamw", "sgd"}:
+            raise ValueError(
+                f"optimizer must be 'adamw' or 'sgd', got '{self.optimizer}'"
+            )
+        if self.loss_fn not in {"cross_entropy", "focal", "label_smoothing"}:
+            raise ValueError(
+                f"loss_fn must be 'cross_entropy', 'focal', or 'label_smoothing', got '{self.loss_fn}'"
+            )
+        if self.scheduler not in {"none", "cosine", "onecycle"}:
+            raise ValueError(
+                f"scheduler must be 'none', 'cosine', or 'onecycle', got '{self.scheduler}'"
+            )
+        if not 0.0 <= self.dropout <= 1.0:
+            raise ValueError(f"dropout must be between 0.0 and 1.0, got {self.dropout}")
         if self.augmentation == "recipe":
             if (
                 not isinstance(self.augmentation_params, dict)
@@ -2345,7 +2479,7 @@ def train_two_stage(
     )
 
     # Build model
-    model, weights = build_efficientnet_b4(num_classes)
+    model, weights = build_efficientnet_b4(num_classes, dropout=cfg.dropout)
     model = model.to(device)
 
     # Apply torch.compile for speedup (PyTorch 2.0+)
@@ -2455,9 +2589,51 @@ def train_two_stage(
         )
 
     # Loss function
-    criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
+    if cfg.loss_fn == "focal":
+        criterion = FocalLoss(gamma=cfg.focal_gamma)
+    elif cfg.loss_fn == "label_smoothing":
+        criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
+    else:  # cross_entropy (default)
+        criterion = nn.CrossEntropyLoss()
 
     history = []
+
+    # ==========================================================================
+    # HELPER FUNCTION: Create optimizer
+    # ==========================================================================
+    def create_optimizer(params, lr):
+        """Create optimizer based on config."""
+        if cfg.optimizer == "sgd":
+            return torch.optim.SGD(
+                params,
+                lr=lr,
+                momentum=cfg.momentum,
+                weight_decay=cfg.weight_decay,
+            )
+        else:  # adamw (default)
+            return torch.optim.AdamW(
+                params,
+                lr=lr,
+                weight_decay=cfg.weight_decay,
+            )
+
+    # ==========================================================================
+    # HELPER FUNCTION: Create scheduler
+    # ==========================================================================
+    def create_scheduler(optimizer, epochs, steps_per_epoch):
+        """Create learning rate scheduler based on config."""
+        if cfg.scheduler == "cosine":
+            return CosineAnnealingLR(optimizer, T_max=epochs)
+        elif cfg.scheduler == "onecycle":
+            # OneCycleLR needs total steps
+            return OneCycleLR(
+                optimizer,
+                max_lr=[pg["lr"] for pg in optimizer.param_groups],
+                total_steps=epochs * steps_per_epoch,
+                pct_start=0.1,
+            )
+        else:  # none
+            return None
 
     # ==========================================================================
     # NESTED FUNCTION: run_stage
@@ -2468,6 +2644,7 @@ def train_two_stage(
         optimizer: torch.optim.Optimizer,
         freeze_bn: bool,
         epoch_offset: int = 0,
+        scheduler=None,
     ) -> Path:
         """Run one training stage and return path to best checkpoint."""
         best_f1 = -1.0
@@ -2493,6 +2670,11 @@ def train_two_stage(
                 grad_clip_norm=cfg.grad_clip_norm,
                 freeze_bn=freeze_bn,
             )
+
+            # Step scheduler (per-epoch schedulers like CosineAnnealingLR)
+            # OneCycleLR is per-batch, but we handle it per-epoch here for simplicity
+            if scheduler is not None:
+                scheduler.step()
 
             # Validate
             val_metrics = evaluate(model, val_loader, device, criterion)
@@ -2561,6 +2743,8 @@ def train_two_stage(
     # ==========================================================================
     best_head_path: Path | None = None
     finetune_epoch_offset = 0
+    steps_per_epoch = len(train_loader)
+
     if resumed_from_head:
         print(f"\n{'='*60}")
         print("STAGE 1: Skipped (Resuming from best head checkpoint)")
@@ -2572,12 +2756,29 @@ def train_two_stage(
         print(f"\n{'='*60}")
         print("STAGE 1: Training Classification Head (Backbone Frozen)")
         print(f"{'='*60}")
+        print(
+            f"  Optimizer: {cfg.optimizer.upper()}, Loss: {cfg.loss_fn}, Scheduler: {cfg.scheduler}"
+        )
 
         freeze_backbone(model)
-        optimizer_head = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=cfg.lr_head,
-            weight_decay=cfg.weight_decay,
+        head_trainable_params = [p for p in model.parameters() if p.requires_grad]
+
+        if cfg.optimizer == "sgd":
+            optimizer_head = torch.optim.SGD(
+                head_trainable_params,
+                lr=cfg.lr_head,
+                momentum=cfg.momentum,
+                weight_decay=cfg.weight_decay,
+            )
+        else:  # adamw
+            optimizer_head = torch.optim.AdamW(
+                head_trainable_params,
+                lr=cfg.lr_head,
+                weight_decay=cfg.weight_decay,
+            )
+
+        scheduler_head = create_scheduler(
+            optimizer_head, cfg.head_epochs, steps_per_epoch
         )
 
         best_head_path = run_stage(
@@ -2586,6 +2787,7 @@ def train_two_stage(
             optimizer_head,
             freeze_bn=cfg.freeze_bn_head,
             epoch_offset=0,
+            scheduler=scheduler_head,
         )
 
         # Load best head checkpoint
@@ -2606,6 +2808,9 @@ def train_two_stage(
         print(f"\n{'='*60}")
         print("STAGE 2: Fine-tuning All Layers")
         print(f"{'='*60}")
+        print(
+            f"  Optimizer: {cfg.optimizer.upper()}, Loss: {cfg.loss_fn}, Scheduler: {cfg.scheduler}"
+        )
 
         unfreeze_all(model)
 
@@ -2614,12 +2819,26 @@ def train_two_stage(
         head_param_ids = {id(p) for p in head_params}
         backbone_params = [p for p in model.parameters() if id(p) not in head_param_ids]
 
-        optimizer_finetune = torch.optim.AdamW(
-            [
-                {"params": backbone_params, "lr": cfg.lr_backbone},
-                {"params": head_params, "lr": cfg.lr_head_finetune},
-            ],
-            weight_decay=cfg.weight_decay,
+        if cfg.optimizer == "sgd":
+            optimizer_finetune = torch.optim.SGD(
+                [
+                    {"params": backbone_params, "lr": cfg.lr_backbone},
+                    {"params": head_params, "lr": cfg.lr_head_finetune},
+                ],
+                momentum=cfg.momentum,
+                weight_decay=cfg.weight_decay,
+            )
+        else:  # adamw
+            optimizer_finetune = torch.optim.AdamW(
+                [
+                    {"params": backbone_params, "lr": cfg.lr_backbone},
+                    {"params": head_params, "lr": cfg.lr_head_finetune},
+                ],
+                weight_decay=cfg.weight_decay,
+            )
+
+        scheduler_finetune = create_scheduler(
+            optimizer_finetune, cfg.finetune_epochs, steps_per_epoch
         )
 
         best_finetune_path = run_stage(
@@ -2628,6 +2847,7 @@ def train_two_stage(
             optimizer_finetune,
             freeze_bn=cfg.freeze_bn_finetune,
             epoch_offset=finetune_epoch_offset,
+            scheduler=scheduler_finetune,
         )
 
         # Load best fine-tuned checkpoint
@@ -2946,8 +3166,8 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     # Highlight best epoch
     best_epoch = history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"]
     best_f1 = history_df["val_f1"].max()
-    #ax.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
-    #ax.scatter([best_epoch], [best_f1], color="#9b59b6", s=100, zorder=5, marker="*")
+    # ax.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
+    # ax.scatter([best_epoch], [best_f1], color="#9b59b6", s=100, zorder=5, marker="*")
 
     # Main title
     title = "Training History"
