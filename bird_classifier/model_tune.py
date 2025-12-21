@@ -1359,6 +1359,8 @@ def plot_evaluation_suite(
     *,
     ds=None,
     sample_indices: List[int] | None = None,
+    id_to_name: Dict[int, str] | None = None,
+    train_label_index: Dict[int, np.ndarray] | None = None,
     top_n_cm_classes: int = 20,
     top_n_pairs: int = 5,
     images_per_pair: int = 3,
@@ -1379,7 +1381,11 @@ def plot_evaluation_suite(
         y_pred: Predicted labels from evaluation
         class_ids: List of class IDs (maps index back to original class ID)
         run_name: Experiment name for title
-        top_n_classes: Number of classes to show in confusion matrix detail
+        id_to_name: Optional mapping from class_id to species name
+        train_label_index: Optional label index for finding reference images of predicted class
+        top_n_cm_classes: Number of classes to show in confusion matrix detail
+        top_n_pairs: Number of confused pairs to show
+        images_per_pair: Number of example images per confused pair
         figsize: Figure size
     """
     report = classification_report(
@@ -1553,7 +1559,7 @@ def plot_evaluation_suite(
     )
     ax6.set_xlabel("Predicted Class ID", fontsize=10)
     ax6.set_ylabel("True Class ID", fontsize=10)
-    ax6.set_title("Confusion Matrix (Most Confused Classes)", fontweight="bold")
+    ax6.set_title(f"Confusion Matrix for Top {len(confused_class_idxs)} Confused Classes", fontweight="bold")
     ax6.set_xticklabels(ax6.get_xticklabels(), rotation=45, ha="right", fontsize=8)
     ax6.set_yticklabels(ax6.get_yticklabels(), rotation=0, fontsize=8)
 
@@ -1564,7 +1570,11 @@ def plot_evaluation_suite(
     if top_pairs:
         print("\nMost Confused Pairs (True -> Predicted)")
         for true_i, pred_i, count in top_pairs:
-            print(f"  {class_ids[true_i]} -> {class_ids[pred_i]}: {count}")
+            true_id = class_ids[true_i]
+            pred_id = class_ids[pred_i]
+            true_name = id_to_name.get(true_id, f"ID_{true_id}") if id_to_name else f"ID_{true_id}"
+            pred_name = id_to_name.get(pred_id, f"ID_{pred_id}") if id_to_name else f"ID_{pred_id}"
+            print(f"  {true_name} -> {pred_name}: {count} misclassifications")
 
     if ds is not None and sample_indices is not None and len(sample_indices) == len(y_true) and top_pairs:
         _plot_confused_pair_examples(
@@ -1575,6 +1585,8 @@ def plot_evaluation_suite(
             class_ids=class_ids,
             pairs=top_pairs,
             images_per_pair=images_per_pair,
+            id_to_name=id_to_name,
+            train_label_index=train_label_index,
         )
 
 
@@ -1587,19 +1599,46 @@ def _plot_confused_pair_examples(
     class_ids: List[int],
     pairs: List[Tuple[int, int, int]],
     images_per_pair: int = 3,
+    id_to_name: Dict[int, str] | None = None,
+    train_label_index: Dict[int, np.ndarray] | None = None,
     figsize: Tuple[int, int] | None = None,
 ) -> None:
+    """
+    Plot examples of confused pairs with optional reference images of the predicted class.
+    
+    Each row shows:
+    - Misclassified examples (actual class, predicted as wrong class)
+    - A reference image of the predicted (wrong) class for comparison
+    
+    Args:
+        ds: DeepLake dataset
+        sample_indices: Indices into ds for each prediction
+        y_true: True labels (class indices, not IDs)
+        y_pred: Predicted labels (class indices, not IDs)
+        class_ids: Maps class index to class ID
+        pairs: List of (true_idx, pred_idx, count) tuples
+        images_per_pair: Number of misclassified examples per pair
+        id_to_name: Optional mapping from class_id to species name
+        train_label_index: Optional label index to find reference images of predicted class
+        figsize: Optional figure size
+    """
     images_per_pair = max(1, int(images_per_pair))
     n_pairs = len(pairs)
     if n_pairs <= 0:
         return
 
+    # Add 1 column for reference image if train_label_index is available
+    show_reference = train_label_index is not None
+    n_cols = images_per_pair + (1 if show_reference else 0)
+    
     if figsize is None:
-        figsize = (images_per_pair * 3.2, max(3.0, n_pairs * 2.6))
+        figsize = (n_cols * 3.2, max(3.0, n_pairs * 2.8))
 
-    fig, axes = plt.subplots(n_pairs, images_per_pair, figsize=figsize)
+    fig, axes = plt.subplots(n_pairs, n_cols, figsize=figsize)
     if n_pairs == 1:
         axes = np.array([axes])
+    if n_cols == 1:
+        axes = axes.reshape(-1, 1)
 
     for row, (true_i, pred_i, count) in enumerate(pairs):
         matches = [k for k, (yt, yp) in enumerate(zip(y_true, y_pred)) if yt == true_i and yp == pred_i]
@@ -1609,7 +1648,16 @@ def _plot_confused_pair_examples(
 
         true_id = class_ids[true_i]
         pred_id = class_ids[pred_i]
+        
+        # Get species names
+        true_name = id_to_name.get(true_id, f"ID_{true_id}") if id_to_name else f"ID_{true_id}"
+        pred_name = id_to_name.get(pred_id, f"ID_{pred_id}") if id_to_name else f"ID_{pred_id}"
+        
+        # Truncate long names for display
+        true_name_short = true_name[:25] + "..." if len(true_name) > 28 else true_name
+        pred_name_short = pred_name[:25] + "..." if len(pred_name) > 28 else pred_name
 
+        # Plot misclassified examples
         for col, k in enumerate(chosen):
             ax = axes[row, col]
             ax.axis("off")
@@ -1623,9 +1671,33 @@ def _plot_confused_pair_examples(
                 continue
             ax.imshow(img)
             if col == 0:
-                ax.set_title(f"{true_id} -> {pred_id} (n={count})", fontsize=9)
+                ax.set_title(f"Actual: {true_name_short}\n→ Pred: {pred_name_short} (n={count})", 
+                           fontsize=8, color="red")
+            else:
+                ax.set_title("Misclassified", fontsize=8, color="red")
+        
+        # Plot reference image of predicted class (last column)
+        if show_reference:
+            ref_ax = axes[row, -1]
+            ref_ax.axis("off")
+            
+            # Find a reference image of the predicted class
+            if pred_id in train_label_index and len(train_label_index[pred_id]) > 0:
+                ref_idx = int(train_label_index[pred_id][0])
+                try:
+                    ref_sample = ds[ref_idx]
+                    ref_img = _ensure_uint8_rgb(ref_sample["images"].numpy())
+                    ref_ax.imshow(ref_img)
+                    ref_ax.set_title(f"Reference:\n{pred_name_short}", fontsize=8, color="green")
+                    # Add a green border to distinguish reference
+                    for spine in ref_ax.spines.values():
+                        spine.set_visible(True)
+                        spine.set_color("green")
+                        spine.set_linewidth(3)
+                except Exception:
+                    ref_ax.text(0.5, 0.5, "Reference\nN/A", ha="center", va="center", fontsize=9)
 
-    fig.suptitle("Confused Pair Examples (Top Pairs)", fontsize=12, fontweight="bold")
+    fig.suptitle("Confused Pair Examples (with Reference Images)", fontsize=12, fontweight="bold")
     plt.tight_layout()
     plt.show()
 
@@ -2427,6 +2499,22 @@ def make_experiment_runner(
     runs_dir.mkdir(parents=True, exist_ok=True)
 
     results: List[Dict[str, Any]] = []
+    
+    # Build id_to_name mapping from dataset metadata
+    id_to_name: Dict[int, str] | None = None
+    try:
+        class_names = ds_train.labels.info.get("class_names", None)
+        if class_names is not None:
+            actual_labels_used = set(train_label_index.keys())
+            id_to_name = {
+                label_id: class_names[label_id]
+                for label_id in actual_labels_used
+                if label_id < len(class_names)
+            }
+            print(f"Loaded species names for {len(id_to_name)} classes")
+    except Exception as e:
+        print(f"Could not load species names: {e}")
+        id_to_name = None
 
     def _cleanup(model: nn.Module) -> None:
         del model
@@ -2464,6 +2552,8 @@ def make_experiment_runner(
                     run_name=cfg.run_name,
                     ds=ds_train,
                     sample_indices=summary.get("test_indices"),
+                    id_to_name=id_to_name,
+                    train_label_index=train_label_index,
                 )
             else:
                 # Fallback to simple training history plot if no test predictions
@@ -2675,6 +2765,8 @@ def make_experiment_runner(
                     run_name=f"{cfg.run_name} (Holdout)",
                     ds=ds_holdout,
                     sample_indices=summary.get("holdout_indices"),
+                    id_to_name=id_to_name,
+                    train_label_index=holdout_label_index,  # Use holdout index for reference images
                 )
             else:
                 plot_training_history(history_df, run_name=cfg.run_name)
