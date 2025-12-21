@@ -1157,6 +1157,16 @@ def make_dataloader(
         num_workers: Number of worker processes. Use 0 for DeepLake without caching,
                      or 4 when using cached PNG files for ~3x speedup.
     """
+    import sys
+    import platform
+    
+    # Use spawn context on Linux (Colab) to avoid fork-related multiprocessing errors
+    # The "can only test a child process" assertion error occurs with fork + notebooks
+    mp_context = None
+    if num_workers > 0 and platform.system() == "Linux":
+        import multiprocessing
+        mp_context = multiprocessing.get_context("spawn")
+    
     return DataLoader(
         dataset,
         batch_size=max(1, int(batch_size)),
@@ -1165,6 +1175,7 @@ def make_dataloader(
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         persistent_workers=(num_workers > 0),  # Keep workers alive between batches
+        multiprocessing_context=mp_context,
     )
 
 
