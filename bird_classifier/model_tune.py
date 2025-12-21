@@ -748,10 +748,9 @@ class BackgroundSubtract(A.ImageOnlyTransform):
         *,
         sigma: float = 3.0,
         strength: float = 0.8,
-        always_apply: bool = False,
         p: float = 0.5,
     ):
-        super().__init__(always_apply=always_apply, p=p)
+        super().__init__(p=p)
         self.sigma = float(sigma)
         self.strength = float(strength)
 
