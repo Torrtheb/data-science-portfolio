@@ -1170,6 +1170,8 @@ def make_dataloader(
         import multiprocessing
         mp_context = multiprocessing.get_context("spawn")
     
+    # Note: persistent_workers can cause "Bad file descriptor" errors on cleanup,
+    # so we disable it. The slight performance hit is worth the stability.
     return DataLoader(
         dataset,
         batch_size=max(1, int(batch_size)),
@@ -1177,7 +1179,8 @@ def make_dataloader(
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
-        persistent_workers=(num_workers > 0),  # Keep workers alive between batches
+        persistent_workers=False,  # Disabled to avoid OSError on cleanup
+        prefetch_factor=2 if num_workers > 0 else None,  # Prefetch for speed
         multiprocessing_context=mp_context,
     )
 
