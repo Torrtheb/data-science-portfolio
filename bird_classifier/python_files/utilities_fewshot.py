@@ -92,7 +92,6 @@ def make_predict_fn_lime(
     return predict_fn_lime
 
 
-# Module-level globals for fast embedding lookup
 _idx_to_pos: dict[int, int] | None = None
 ALL_EMBEDDINGS: npt.NDArray[np.floating[Any]] | None = None
 

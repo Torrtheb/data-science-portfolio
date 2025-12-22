@@ -1654,14 +1654,19 @@ def train_one_epoch(
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            # Track scale before step to detect if optimizer was skipped
+            old_scale = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            # Only step scheduler if optimizer actually updated (scale didn't change due to inf/nan)
+            optimizer_stepped = scaler.get_scale() >= old_scale
         else:
             logits = model(x)
             loss = criterion(logits, y)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
             optimizer.step()
+            optimizer_stepped = True
 
         # Debug: Print memory after first batch
         if first_batch and device.type == "cuda":
@@ -1678,8 +1683,8 @@ def train_one_epoch(
         y_true.extend(y.cpu().tolist())
         y_pred.extend(logits.argmax(dim=1).cpu().tolist())
 
-        # Step scheduler per-batch (for OneCycleLR)
-        if scheduler is not None and scheduler_step_per_batch:
+        # Step scheduler per-batch (for OneCycleLR) - only if optimizer stepped
+        if scheduler is not None and scheduler_step_per_batch and optimizer_stepped:
             scheduler.step()
 
         pbar.set_postfix(loss=total_loss / n)
@@ -2646,10 +2651,11 @@ def train_two_stage(
             return CosineAnnealingLR(optimizer, T_max=epochs)
         elif cfg.scheduler == "onecycle":
             # OneCycleLR needs total steps
+            # Note: last_epoch=-1 is default, meaning step() hasn't been called yet
             return OneCycleLR(
                 optimizer,
                 max_lr=[pg["lr"] for pg in optimizer.param_groups],
-                total_steps=epochs * steps_per_epoch,
+                total_steps=epochs * steps_per_epoch + 1,  # +1 to avoid edge case warning
                 pct_start=0.1,
             )
         else:  # none
