@@ -1,6 +1,7 @@
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple, Optional, Any, Callable, Mapping
 from pathlib import Path
+import hashlib
 import json
 import multiprocessing
 import os
@@ -1208,6 +1209,7 @@ class BirdDataset(Dataset):
         return_index: bool = False,
         cache_dir: Path | None = None,
         cache_version: str = "v1_uint8_rgb_pad_bbox",
+        cache_namespace: str | None = None,
     ):
         self.ds = ds
         self.indices = np.asarray(indices, dtype=int)
@@ -1221,16 +1223,46 @@ class BirdDataset(Dataset):
 
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.cache_version = str(cache_version)
+        self.cache_namespace = (
+            str(cache_namespace) if cache_namespace is not None else None
+        )
 
         if preprocess_mode not in {"native", "bbox_crop"}:
             raise ValueError("preprocess_mode must be 'native' or 'bbox_crop'")
 
         self.model_transform = weights.transforms()
 
+    def _dataset_cache_namespace(self) -> str:
+        """Return a stable, filesystem-safe cache namespace for the dataset.
+
+        Important: ds_train and ds_val share overlapping integer indices.
+        If the cache key is only `idx`, images from different datasets will
+        collide and silently produce garbage evaluation metrics.
+        """
+
+        if self.cache_namespace is not None:
+            return self.cache_namespace
+
+        # DeepLake datasets typically have a stable `.path` like:
+        # "hub://activeloop/nabirds-dataset-train"
+        ds_path = getattr(self.ds, "path", None)
+        if not ds_path:
+            # Fallback: use class name + length to reduce collision likelihood.
+            ds_path = f"{type(self.ds).__name__}:{len(self.ds)}"
+
+        digest = hashlib.sha1(str(ds_path).encode("utf-8")).hexdigest()[:12]
+        return f"ds_{digest}"
+
     def _cache_path(self, idx: int) -> Path | None:
         if self.cache_dir is None:
             return None
-        subdir = self.cache_dir / self.cache_version / self.preprocess_mode
+        # Namespace cache by dataset to avoid ds_train vs ds_val collisions.
+        subdir = (
+            self.cache_dir
+            / self.cache_version
+            / self._dataset_cache_namespace()
+            / self.preprocess_mode
+        )
         subdir.mkdir(parents=True, exist_ok=True)
         pad_flag = 1 if self.pad_to_square else 0
         pad_pct = int(round(self.bbox_padding_ratio * 1000))
