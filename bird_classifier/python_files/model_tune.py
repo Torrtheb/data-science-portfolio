@@ -28,7 +28,6 @@ from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
 import torchvision.models as models
 
-# Metrics
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -90,15 +89,14 @@ BASELINE_CONFIG = dict(
     pad_to_square=True,
     cache_dir=None,
     cache_version="v1_uint8_rgb_pad_bbox",
-    early_stop_patience=3,  # Stop if no improvement for 3 epochs (0 = disabled)
+    early_stop_patience=3,
     seed=42,
-    # New hyperparameters for Phase 2 tuning
-    optimizer="adamw",  # 'adamw' or 'sgd'
-    momentum=0.9,  # For SGD optimizer
-    loss_fn="cross_entropy",  # 'cross_entropy', 'focal', or 'label_smoothing'
-    focal_gamma=2.0,  # Gamma for focal loss
-    scheduler="none",  # 'none', 'cosine', or 'onecycle'
-    dropout=0.4,  # Dropout rate for classifier head
+    optimizer="adamw",
+    momentum=0.9,
+    loss_fn="cross_entropy",
+    focal_gamma=2.0,
+    scheduler="none",
+    dropout=0.4,
 )
 
 
@@ -189,7 +187,7 @@ def build_label_index(ds: DeepLakeDataset) -> Dict[int, np.ndarray]:
     return {k: np.array(v, dtype=np.int64) for k, v in label_to_idxs.items()}
 
 
-def save_label_index(label_index: Dict[int, np.ndarray], path) -> None:
+def save_label_index(label_index: Dict[int, np.ndarray], path: Path | str) -> None:
     """Save label index to compressed numpy file.
 
     Args:
@@ -199,7 +197,7 @@ def save_label_index(label_index: Dict[int, np.ndarray], path) -> None:
     np.savez_compressed(path, **{str(k): v for k, v in label_index.items()})
 
 
-def load_label_index(path) -> Dict[int, np.ndarray]:
+def load_label_index(path: Path | str) -> Dict[int, np.ndarray]:
     """Load label index from numpy file.
 
     Args:
@@ -440,7 +438,7 @@ class SplitIndices:
     test_idx: np.ndarray
     test_y: np.ndarray
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"SplitIndices(train={len(self.train_idx)}, "
             f"val={len(self.val_idx)}, test={len(self.test_idx)})"
@@ -453,18 +451,18 @@ def _allocate_split_counts(
     """Calculate how many samples go to train/val/test for a single class.
 
     Handles edge cases for small classes:
-    - 1 sample → all to train
-    - 2 samples → 1 train, 1 val
-    - 3 samples → 1 each
-    - More → respect fractions with min 1 for val/test, min 2 for train
+        - 1 sample → all to train
+        - 2 samples → 1 train, 1 val
+        - 3 samples → 1 each
+        - More → respect fractions with min 1 for val/test, min 2 for train
 
     Args:
         n: Total number of samples for the class.
-        val_frac: Fraction of samples for validation.
-        test_frac: Fraction of samples for test.
+        val_frac: Fraction of samples for validation (0.0-1.0).
+        test_frac: Fraction of samples for test (0.0-1.0).
 
     Returns:
-        Tuple of (n_train, n_val, n_test) sample counts.
+        Tuple of (n_train, n_val, n_test) sample counts that sum to n.
     """
     if n <= 0:
         return 0, 0, 0
@@ -600,7 +598,7 @@ def _ensure_uint8_rgb(img: np.ndarray) -> np.ndarray:
 def _pad_to_square(img: np.ndarray) -> np.ndarray:
     """Pad image to square using reflection padding.
 
-    Preserves aspect ratio and avoids black borders which could confuse the model.
+    Preserves aspect ratio and avoids black borders.
 
     Args:
         img: Input image as numpy array with shape (H, W) or (H, W, C).
@@ -752,7 +750,7 @@ def apply_bbox_crop_optimized(
 AUGMENTATION_REGISTRY: Dict[str, Callable[[], A.Compose]] = {}
 
 
-def register_augmentation(name: str):
+def register_augmentation(name: str) -> Callable:
     """Decorator to register an augmentation pipeline.
 
     Args:
@@ -762,7 +760,7 @@ def register_augmentation(name: str):
         Decorator function that registers the augmentation.
     """
 
-    def decorator(func):
+    def decorator(func: Callable) -> Callable:
         AUGMENTATION_REGISTRY[name] = func
         return func
 
@@ -867,7 +865,16 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
         return None
 
     def _p(key: str, *alt_keys: str, default: float = 0.0) -> float:
-        """Get probability value, checking primary key then alternatives."""
+        """Get probability value from params, checking primary key then alternatives.
+
+        Args:
+            key: Primary parameter key to check.
+            *alt_keys: Alternative keys to check if primary is not found.
+            default: Default value if no key is found.
+
+        Returns:
+            Float probability value in range [0.0, 1.0].
+        """
         try:
             val = params.get(key)
             if val is not None:
@@ -881,11 +888,29 @@ def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
             return default
 
     def _f(key: str, *alt_keys: str, default: float = 0.0) -> float:
-        """Get float value, checking primary key then alternatives."""
+        """Get float value from params, checking primary key then alternatives.
+
+        Args:
+            key: Primary parameter key to check.
+            *alt_keys: Alternative keys to check if primary is not found.
+            default: Default value if no key is found.
+
+        Returns:
+            Float parameter value.
+        """
         return _p(key, *alt_keys, default=default)
 
     def _i(key: str, *alt_keys: str, default: int = 0) -> int:
-        """Get int value, checking primary key then alternatives."""
+        """Get integer value from params, checking primary key then alternatives.
+
+        Args:
+            key: Primary parameter key to check.
+            *alt_keys: Alternative keys to check if primary is not found.
+            default: Default value if no key is found.
+
+        Returns:
+            Integer parameter value.
+        """
         try:
             val = params.get(key)
             if val is not None:
@@ -1099,7 +1124,7 @@ def resolve_train_augmentation(
 
 
 @register_augmentation("basic")
-def aug_basic():
+def aug_basic() -> A.Compose:
     """Basic augmentations: flip + slight color jitter.
 
     Returns:
@@ -1116,7 +1141,7 @@ def aug_basic():
 
 
 @register_augmentation("moderate")
-def aug_moderate():
+def aug_moderate() -> A.Compose:
     """Moderate augmentations: flip + color + rotation + blur.
 
     Returns:
@@ -1139,7 +1164,7 @@ def aug_moderate():
 
 
 @register_augmentation("strong")
-def aug_strong():
+def aug_strong() -> A.Compose:
     """Strong augmentations: includes CoarseDropout, ShiftScale, etc.
 
     Returns:
@@ -1390,8 +1415,7 @@ def build_efficientnet_b4(
     weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
     model = models.efficientnet_b4(weights=weights)
 
-    # Replace classifier (original: Dropout(0.4) → Linear(1792 → 1000))
-    in_features = model.classifier[-1].in_features  # 1792
+    in_features = model.classifier[-1].in_features
     model.classifier = nn.Sequential(
         nn.Dropout(p=dropout, inplace=True),
         nn.Linear(in_features, num_classes),
@@ -1507,7 +1531,7 @@ def make_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
     """
     labels = np.asarray(labels, dtype=int)
     counts = np.bincount(labels)
-    counts[counts == 0] = 1  # Avoid division by zero
+    counts[counts == 0] = 1
     class_weights = 1.0 / counts
     sample_weights = class_weights[labels]
 
@@ -1688,7 +1712,7 @@ def train_one_epoch(
     use_amp: bool = True,
     grad_clip_norm: float = 1.0,
     freeze_bn: bool = True,
-    scheduler=None,
+    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
     scheduler_step_per_batch: bool = False,
 ) -> Dict[str, float]:
     """Train model for one epoch.
@@ -1710,7 +1734,7 @@ def train_one_epoch(
     """
     model.train()
 
-    # Keep BatchNorm in eval mode if requested (recommended for fine-tuning)
+    # Keep BatchNorm in eval mode if requested
     if freeze_bn:
         model.apply(set_batchnorm_eval)
 
@@ -1732,7 +1756,6 @@ def train_one_epoch(
             flush=True,
         )
 
-    # NOTE: First batch may be slow due to DeepLake cloud download + cache building
     print("    Loading first batch...", flush=True)
     pbar = tqdm(loader, desc="Train", leave=False)
     first_batch = True
@@ -2662,8 +2685,6 @@ def train_two_stage(
         cache_version=cfg.cache_version,
     )
 
-    # Create dataloaders
-    # Use num_workers=4 when caching is enabled (cached PNGs don't need DeepLake)
     num_workers = 4 if cache_dir is not None else 0
     sampler = (
         make_weighted_sampler(splits.train_y) if cfg.use_weighted_sampler else None
@@ -2707,20 +2728,18 @@ def train_two_stage(
             holdout_ds, cfg.batch_size, shuffle=False, num_workers=num_workers
         )
 
-    # Loss function
     if cfg.loss_fn == "focal":
         criterion = FocalLoss(gamma=cfg.focal_gamma)
     elif cfg.loss_fn == "label_smoothing":
         criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
-    else:  # cross_entropy (default)
+    else:
         criterion = nn.CrossEntropyLoss()
 
     history = []
 
-    # ==========================================================================
-    # HELPER FUNCTION: Create optimizer
-    # ==========================================================================
-    def create_optimizer(params, lr):
+    def create_optimizer(
+        params: List[torch.nn.Parameter], lr: float
+    ) -> torch.optim.Optimizer:
         """Create optimizer based on config.
 
         Args:
@@ -2737,17 +2756,16 @@ def train_two_stage(
                 momentum=cfg.momentum,
                 weight_decay=cfg.weight_decay,
             )
-        else:  # adamw (default)
+        else:
             return torch.optim.AdamW(
                 params,
                 lr=lr,
                 weight_decay=cfg.weight_decay,
             )
 
-    # ==========================================================================
-    # HELPER FUNCTION: Create scheduler
-    # ==========================================================================
-    def create_scheduler(optimizer, epochs, steps_per_epoch):
+    def create_scheduler(
+        optimizer: torch.optim.Optimizer, epochs: int, steps_per_epoch: int
+    ) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
         """Create learning rate scheduler based on config.
 
         Args:
@@ -2761,27 +2779,22 @@ def train_two_stage(
         if cfg.scheduler == "cosine":
             return CosineAnnealingLR(optimizer, T_max=epochs)
         elif cfg.scheduler == "onecycle":
-            # OneCycleLR needs total steps
-            # Note: last_epoch=-1 is default, meaning step() hasn't been called yet
             return OneCycleLR(
                 optimizer,
                 max_lr=[pg["lr"] for pg in optimizer.param_groups],
-                total_steps=epochs * steps_per_epoch + 1,  # +1 to avoid edge case warning
+                total_steps=epochs * steps_per_epoch + 1,
                 pct_start=0.1,
             )
-        else:  # none
+        else:
             return None
 
-    # ==========================================================================
-    # NESTED FUNCTION: run_stage
-    # ==========================================================================
     def run_stage(
         stage_name: str,
         epochs: int,
         optimizer: torch.optim.Optimizer,
         freeze_bn: bool,
         epoch_offset: int = 0,
-        scheduler=None,
+        scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
     ) -> Path:
         """Run one training stage and return path to best checkpoint.
 
@@ -2891,9 +2904,6 @@ def train_two_stage(
 
         return best_path
 
-    # ==========================================================================
-    # STAGE 1: Head Training (Frozen Backbone)
-    # ==========================================================================
     best_head_path: Path | None = None
     finetune_epoch_offset = 0
     steps_per_epoch = len(train_loader)
@@ -2954,9 +2964,6 @@ def train_two_stage(
         print(f"{'='*60}")
         finetune_epoch_offset = 0
 
-    # ==========================================================================
-    # STAGE 2: Fine-tuning (All Layers) — only if finetune_epochs > 0
-    # ==========================================================================
     if cfg.finetune_epochs > 0:
         print(f"\n{'='*60}")
         print("STAGE 2: Fine-tuning All Layers")
@@ -3012,9 +3019,6 @@ def train_two_stage(
         print("STAGE 2: Skipped (finetune_epochs=0)")
         print(f"{'='*60}")
 
-    # ==========================================================================
-    # FINAL EVALUATION
-    # ==========================================================================
     print(f"\n{'='*60}")
     print("FINAL EVALUATION")
     print(f"{'='*60}")
@@ -3149,13 +3153,9 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     # Find stage boundary for vertical line
     head_epochs = history_df[history_df["stage"] == "head"]["global_epoch"].max()
 
-    # Color scheme
-    train_color = "#2ecc71"  # Green
-    val_color = "#e74c3c"  # Red
+    train_color = "#2ecc71"
+    val_color = "#e74c3c"
 
-    # =========================================================================
-    # Plot 1: Loss
-    # =========================================================================
     ax = axes[0]
     ax.plot(
         epochs,
@@ -3202,9 +3202,6 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
         alpha=0.7,
     )
 
-    # =========================================================================
-    # Plot 2: Accuracy
-    # =========================================================================
     ax = axes[1]
     ax.plot(
         epochs,
@@ -3234,9 +3231,6 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
 
-    # =========================================================================
-    # Plot 3: F1 Score
-    # =========================================================================
     ax = axes[2]
     ax.plot(
         epochs,
@@ -3266,9 +3260,6 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
 
-    # =========================================================================
-    # Plot 4: All Validation Metrics Combined
-    # =========================================================================
     ax = axes[3]
     ax.plot(
         epochs,
@@ -3316,13 +3307,9 @@ def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 1)
 
-    # Highlight best epoch
     best_epoch = history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"]
     best_f1 = history_df["val_f1"].max()
-    # ax.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
-    # ax.scatter([best_epoch], [best_f1], color="#9b59b6", s=100, zorder=5, marker="*")
 
-    # Main title
     title = "Training History"
     if run_name:
         title += f" — {run_name}"
@@ -3399,6 +3386,11 @@ def make_experiment_runner(
         id_to_name = None
 
     def _cleanup(model: nn.Module) -> None:
+        """Clean up model and free GPU memory.
+
+        Args:
+            model: Model to delete.
+        """
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -4072,14 +4064,17 @@ def compute_confused_pairs(
 ) -> List[Dict[str, int]]:
     """Identify the most frequently confused class pairs from predictions.
 
+    Computes a confusion matrix and extracts off-diagonal elements
+    (misclassifications) sorted by frequency.
+
     Args:
-        y_true: Ground truth labels.
-        y_pred: Predicted labels.
-        top_n: Number of top confused pairs to return.
+        y_true: Ground truth labels as numpy array or list.
+        y_pred: Predicted labels as numpy array or list.
+        top_n: Number of top confused pairs to return. Defaults to 20.
 
     Returns:
         List of dicts with 'true_class', 'pred_class', and 'count' keys,
-        sorted by count in descending order.
+        sorted by count in descending order. Empty list if no confusions.
     """
     from sklearn.metrics import confusion_matrix as sklearn_cm
 
@@ -4114,15 +4109,22 @@ def prepare_lime_image(
 ) -> np.ndarray:
     """Prepare a base image for LIME that matches training preprocessing.
 
+    Applies the same preprocessing pipeline used during training to ensure
+    LIME explanations are computed on the same representation the model sees.
+
     Args:
-        ds: DeepLake dataset.
+        ds: DeepLake dataset containing images and bounding boxes.
         idx: Sample index in the dataset.
         preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
-        bbox_padding_ratio: Padding ratio for bbox crop.
-        pad_to_square: Whether to pad the image to square.
+        bbox_padding_ratio: Padding ratio for bbox crop. Defaults to 0.15.
+        pad_to_square: Whether to pad the image to square. Defaults to True.
 
     Returns:
-        Preprocessed image as uint8 RGB numpy array.
+        Preprocessed image as uint8 RGB numpy array with shape (H, W, 3).
+
+    Raises:
+        IndexError: If idx is out of bounds for the dataset.
+        KeyError: If required fields ('images', 'boxes') are missing from dataset.
     """
     sample = ds[int(idx)]
     img = _ensure_uint8_rgb(sample["images"].numpy())
