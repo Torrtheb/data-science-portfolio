@@ -7,7 +7,6 @@ import multiprocessing
 import os
 import platform
 import random
-import shutil
 import sys
 import time
 from collections import defaultdict
@@ -277,74 +276,6 @@ def load_experiment_results(
     except Exception as e:
         print(f"Warning: Failed to load experiment '{run_name}': {e}")
         return None
-
-
-def export_experiments_for_github(
-    run_names: List[str],
-    output_dir: Path,
-    runs_dir: Path = None,
-    include_checkpoints: bool = False,
-) -> Dict[str, bool]:
-    """Export experiment results to a directory suitable for GitHub.
-
-    This exports lightweight files (config, history, summary) that can be
-    committed to GitHub and downloaded in Colab to skip re-training.
-
-    Args:
-        run_names: List of experiment names to export.
-        output_dir: Directory to save exported files.
-        runs_dir: Source runs directory. Defaults to RUNS_DIR.
-        include_checkpoints: If True, also copy model checkpoints (large files!).
-
-    Returns:
-        Dict mapping run_name to success status (True if exported successfully).
-    """
-    runs_dir = runs_dir or RUNS_DIR
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    status = {}
-    lightweight_files = [
-        "config.json",
-        "history.csv",
-        "summary.json",
-        "test_classification_report.txt",
-        "holdout_classification_report.txt",
-    ]
-    checkpoint_files = ["best_head.pt", "best_finetune.pt"]
-
-    for run_name in run_names:
-        run_dir = runs_dir / run_name
-        out_run_dir = output_dir / run_name
-
-        if not run_dir.exists():
-            print(f"  Skipping '{run_name}': not found")
-            status[run_name] = False
-            continue
-
-        out_run_dir.mkdir(parents=True, exist_ok=True)
-
-        try:
-            # Copy lightweight files
-            for f in lightweight_files:
-                src = run_dir / f
-                if src.exists():
-                    shutil.copy2(src, out_run_dir / f)
-
-            # Optionally copy checkpoints
-            if include_checkpoints:
-                for f in checkpoint_files:
-                    src = run_dir / f
-                    if src.exists():
-                        shutil.copy2(src, out_run_dir / f)
-
-            status[run_name] = True
-            print(f"  Exported '{run_name}'")
-        except Exception as e:
-            print(f"  Failed '{run_name}': {e}")
-            status[run_name] = False
-
-    return status
 
 
 def get_completed_experiments(runs_dir: Path = None) -> List[str]:
