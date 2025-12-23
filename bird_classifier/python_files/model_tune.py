@@ -1418,6 +1418,10 @@ def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
 
     if hasattr(torch, "compile") and torch.cuda.is_available():
         try:
+            # Fix TF32 API conflict: use only the new API consistently
+            # This prevents "mix of legacy and new APIs" error with inductor backend
+            torch.set_float32_matmul_precision("high")  # Enables TF32 for matmul
+            
             compiled = torch.compile(model, mode="reduce-overhead")
             # Trigger compilation immediately so backend errors surface here
             # (some failures happen on the first forward, not at compile() call time).
@@ -1431,7 +1435,7 @@ def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
                 with torch.amp.autocast("cuda"):
                     _ = compiled(dummy)
 
-            print("torch.compile enabled (10-30% speedup)")
+            print("torch.compile enabled")
             return compiled
         except Exception as e:
             print(f"torch.compile failed, using eager mode: {e}")
