@@ -3606,3 +3606,462 @@ def make_experiment_runner(
 # =============================================================================
 # HYPERPARAMETER TUNING UTILITIES
 # =============================================================================
+
+
+def create_tuning_subset(
+    train_label_index: Dict[int, np.ndarray],
+    class_id_to_idx: Dict[int, int],
+    subset_frac: float = 0.20,
+    val_frac: float = 0.20,
+    test_frac: float = 0.0,
+    seed: int = 42,
+) -> Tuple["SplitIndices", Dict[int, np.ndarray]]:
+    """
+    Create a stratified subset of training data for fast hyperparameter tuning.
+
+    Args:
+        train_label_index: Dict mapping class_id to array of dataset indices.
+        class_id_to_idx: Dict mapping class_id to model index.
+        subset_frac: Fraction of data to use for tuning (default 20%).
+        val_frac: Fraction of subset for validation (default 20%).
+        test_frac: Fraction of subset for test (default 0% for speed).
+        seed: Random seed for reproducibility.
+
+    Returns:
+        subset_splits: SplitIndices for the subset
+        subset_label_index: Reduced label index (for weighted sampler)
+    """
+    rng = np.random.default_rng(seed)
+    subset_label_index = {}
+
+    for class_id, indices in train_label_index.items():
+        n_samples = max(1, int(len(indices) * subset_frac))
+        sampled = rng.choice(indices, size=min(n_samples, len(indices)), replace=False)
+        subset_label_index[class_id] = sampled
+
+    subset_splits = split_label_index_stratified(
+        subset_label_index,
+        class_id_to_idx=class_id_to_idx,
+        val_frac=val_frac,
+        test_frac=test_frac,
+        seed=seed,
+    )
+
+    return subset_splits, subset_label_index
+
+
+def suggest_aug_params(trial: optuna.Trial) -> dict:
+    """Suggest augmentation hyperparameters for Optuna.
+
+    Augmentations searched:
+    - Horizontal flip: Safe for birds (left/right symmetry)
+    - ShiftScaleRotate: Scale (zoom) + rotation, no shift (bbox_crop centers bird)
+    - Brightness/Contrast: Lighting variation
+    - Hue/Saturation: Color variation (careful with plumage colors)
+    - CLAHE: Adaptive contrast (helps with shadowy/bright images)
+    - Blur: Simulates focus issues
+    - Noise: Simulates sensor noise
+    - Cutout: Occlusion regularization
+
+    Args:
+        trial: Optuna trial object.
+
+    Returns:
+        Dict of augmentation parameters.
+    """
+    return {
+        # Horizontal flip
+        "p_hflip": trial.suggest_float("p_hflip", 0.0, 0.5),
+        # Scale + Rotate (ShiftScaleRotate with shift=0)
+        "p_affine": trial.suggest_float("p_affine", 0.0, 0.5),
+        "scale_limit": trial.suggest_float("scale_limit", 0.05, 0.2),
+        "rotate_limit": trial.suggest_int("rotate_limit", 5, 30),
+        # Brightness and contrast
+        "p_brightness_contrast": trial.suggest_float("p_brightness_contrast", 0.0, 0.5),
+        "brightness_limit": trial.suggest_float("brightness_limit", 0.05, 0.3),
+        "contrast_limit": trial.suggest_float("contrast_limit", 0.05, 0.3),
+        # Hue and saturation
+        "p_hue_sat": trial.suggest_float("p_hue_sat", 0.0, 0.4),
+        "hue_shift": trial.suggest_int("hue_shift", 5, 20),
+        "sat_shift": trial.suggest_int("sat_shift", 10, 30),
+        # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        "p_clahe": trial.suggest_float("p_clahe", 0.0, 0.4),
+        "clahe_clip_limit": trial.suggest_float("clahe_clip_limit", 1.0, 4.0),
+        # Blur
+        "p_blur": trial.suggest_float("p_blur", 0.0, 0.3),
+        "blur_limit": trial.suggest_int("blur_limit", 3, 7, step=2),
+        # Noise
+        "p_noise": trial.suggest_float("p_noise", 0.0, 0.3),
+        # Cutout / CoarseDropout
+        "p_cutout": trial.suggest_float("p_cutout", 0.0, 0.5),
+        "cutout_holes": trial.suggest_int("cutout_holes", 1, 8),
+        "cutout_size": trial.suggest_float("cutout_size", 0.02, 0.15),
+    }
+
+
+def aug_objective(
+    trial: optuna.Trial,
+    ds_train: DeepLakeDataset,
+    tuning_label_index: Dict[int, np.ndarray],
+    tuning_splits: "SplitIndices",
+    best_preprocess: str,
+    fast_head_epochs: int,
+    fast_finetune_epochs: int,
+) -> float:
+    """Optuna objective for augmentation search.
+
+    Args:
+        trial: Optuna trial object
+        ds_train: DeepLake training dataset
+        tuning_label_index: Label index for the tuning subset
+        tuning_splits: Train/val splits for tuning
+        best_preprocess: Preprocessing mode to use
+        fast_head_epochs: Number of head training epochs
+        fast_finetune_epochs: Number of finetune epochs
+
+    Returns:
+        Best validation F1 score
+    """
+    aug_params = suggest_aug_params(trial)
+
+    cfg = TrainConfig(
+        run_name=f"optuna_aug_{trial.number}",
+        preprocess_mode=best_preprocess,
+        augmentation="recipe",
+        augmentation_params=aug_params,
+        head_epochs=fast_head_epochs,
+        finetune_epochs=fast_finetune_epochs,
+        early_stop_patience=2,
+        use_torch_compile=True,
+    )
+
+    def _on_epoch_end(stage: str, val_metrics: dict, global_epoch: int) -> None:
+        trial.report(val_metrics["f1"], global_epoch)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    model, history_df, summary, run_dir = train_two_stage(
+        cfg=cfg,
+        ds_train=ds_train,
+        train_label_index=tuning_label_index,
+        splits=tuning_splits,
+        evaluate_test=False,
+        evaluate_holdout=False,
+        on_epoch_end=_on_epoch_end,
+    )
+
+    del model
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    return float(summary.get("val_best_f1", 0.0))
+
+
+def suggest_hpo_params(trial: optuna.Trial) -> dict:
+    """Suggest comprehensive hyperparameters for model tuning.
+
+    Args:
+        trial: Optuna trial object.
+
+    Returns:
+        Dict of hyperparameters including optimizer, learning rates,
+        regularization, loss function, and scheduler settings.
+    """
+    # Optimizer choice
+    optimizer = trial.suggest_categorical("optimizer", ["adamw", "sgd"])
+
+    # Learning rates (log scale for better exploration)
+    lr_head = trial.suggest_float("lr_head", 1e-4, 1e-2, log=True)
+    lr_backbone = trial.suggest_float("lr_backbone", 1e-6, 1e-4, log=True)
+    lr_head_finetune = trial.suggest_float("lr_head_finetune", 1e-5, 1e-3, log=True)
+
+    # SGD-specific: momentum (only relevant if optimizer is SGD)
+    momentum = (
+        trial.suggest_float("momentum", 0.85, 0.99) if optimizer == "sgd" else 0.9
+    )
+
+    # Regularization
+    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
+    dropout = trial.suggest_float("dropout", 0.1, 0.5)
+    grad_clip_norm = trial.suggest_float("grad_clip_norm", 0.5, 5.0)
+
+    # Loss function
+    loss_fn = trial.suggest_categorical(
+        "loss_fn", ["cross_entropy", "focal", "label_smoothing"]
+    )
+
+    # Loss-specific parameters
+    label_smoothing = (
+        trial.suggest_float("label_smoothing", 0.05, 0.2)
+        if loss_fn == "label_smoothing"
+        else 0.0
+    )
+    focal_gamma = (
+        trial.suggest_float("focal_gamma", 1.0, 3.0) if loss_fn == "focal" else 2.0
+    )
+
+    # Learning rate scheduler
+    scheduler = trial.suggest_categorical("scheduler", ["none", "cosine", "onecycle"])
+
+    return {
+        "optimizer": optimizer,
+        "lr_head": lr_head,
+        "lr_backbone": lr_backbone,
+        "lr_head_finetune": lr_head_finetune,
+        "momentum": momentum,
+        "weight_decay": weight_decay,
+        "dropout": dropout,
+        "grad_clip_norm": grad_clip_norm,
+        "loss_fn": loss_fn,
+        "label_smoothing": label_smoothing,
+        "focal_gamma": focal_gamma,
+        "scheduler": scheduler,
+    }
+
+
+def create_optuna_objective(
+    ds_train: DeepLakeDataset,
+    tuning_splits: "SplitIndices",
+    tuning_label_index: Dict[int, np.ndarray],
+    best_preprocess: str,
+    best_augmentation: str,
+    best_augmentation_params: Optional[dict],
+    head_epochs: int = 3,
+    finetune_epochs: int = 5,
+) -> Callable[[optuna.Trial], float]:
+    """Create an Optuna objective function for comprehensive hyperparameter search.
+
+    Args:
+        ds_train: DeepLake training dataset.
+        tuning_splits: Train/val splits for tuning.
+        tuning_label_index: Label index for the tuning subset.
+        best_preprocess: Preprocessing mode to use.
+        best_augmentation: Augmentation mode to use.
+        best_augmentation_params: Augmentation parameters (if using 'recipe').
+        head_epochs: Number of head training epochs per trial.
+        finetune_epochs: Number of finetune epochs per trial.
+
+    Returns:
+        Optuna objective function.
+    """
+
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_hpo_params(trial)
+
+        cfg = TrainConfig(
+            run_name=f"optuna_hpo_{trial.number}",
+            preprocess_mode=best_preprocess,
+            augmentation=best_augmentation,
+            augmentation_params=best_augmentation_params,
+            lr_head=params["lr_head"],
+            lr_backbone=params["lr_backbone"],
+            lr_head_finetune=params["lr_head_finetune"],
+            optimizer=params["optimizer"],
+            momentum=params["momentum"],
+            weight_decay=params["weight_decay"],
+            dropout=params["dropout"],
+            grad_clip_norm=params["grad_clip_norm"],
+            loss_fn=params["loss_fn"],
+            label_smoothing=params["label_smoothing"],
+            focal_gamma=params["focal_gamma"],
+            scheduler=params["scheduler"],
+            head_epochs=head_epochs,
+            finetune_epochs=finetune_epochs,
+            early_stop_patience=2,
+            use_torch_compile=False,
+        )
+
+        def _on_epoch_end(stage: str, val_metrics: dict, global_epoch: int) -> None:
+            trial.report(val_metrics["f1"], global_epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+        model, history_df, summary, run_dir = train_two_stage(
+            cfg=cfg,
+            ds_train=ds_train,
+            train_label_index=tuning_label_index,
+            splits=tuning_splits,
+            evaluate_test=False,
+            evaluate_holdout=False,
+            on_epoch_end=_on_epoch_end,
+        )
+
+        del model
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        return float(summary.get("val_best_f1", 0.0))
+
+    return objective
+
+
+def create_fast_objective(
+    ds_train: DeepLakeDataset,
+    tuning_splits: "SplitIndices",
+    tuning_label_index: Dict[int, np.ndarray],
+    best_preprocess: str,
+    best_augmentation: str,
+    best_augmentation_params: Optional[dict],
+    head_epochs: int,
+    finetune_epochs: int,
+) -> Callable[[optuna.Trial], float]:
+    """Create an Optuna objective with speed optimizations (torch.compile enabled).
+
+    Args:
+        ds_train: DeepLake training dataset.
+        tuning_splits: Train/val splits for tuning.
+        tuning_label_index: Label index for the tuning subset.
+        best_preprocess: Preprocessing mode to use.
+        best_augmentation: Augmentation mode to use.
+        best_augmentation_params: Augmentation parameters (if using 'recipe').
+        head_epochs: Number of head training epochs per trial.
+        finetune_epochs: Number of finetune epochs per trial.
+
+    Returns:
+        Optuna objective function with torch.compile enabled.
+    """
+
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_hpo_params(trial)
+
+        cfg = TrainConfig(
+            run_name=f"optuna_hpo_{trial.number}",
+            preprocess_mode=best_preprocess,
+            augmentation=best_augmentation,
+            augmentation_params=best_augmentation_params,
+            lr_head=params["lr_head"],
+            lr_backbone=params["lr_backbone"],
+            lr_head_finetune=params["lr_head_finetune"],
+            optimizer=params["optimizer"],
+            momentum=params["momentum"],
+            weight_decay=params["weight_decay"],
+            dropout=params["dropout"],
+            grad_clip_norm=params["grad_clip_norm"],
+            loss_fn=params["loss_fn"],
+            label_smoothing=params["label_smoothing"],
+            focal_gamma=params["focal_gamma"],
+            scheduler=params["scheduler"],
+            head_epochs=head_epochs,
+            finetune_epochs=finetune_epochs,
+            early_stop_patience=2,
+            use_torch_compile=True,
+        )
+
+        def _on_epoch_end(stage: str, val_metrics: dict, global_epoch: int) -> None:
+            trial.report(val_metrics["f1"], global_epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+        model, history_df, summary, run_dir = train_two_stage(
+            cfg=cfg,
+            ds_train=ds_train,
+            train_label_index=tuning_label_index,
+            splits=tuning_splits,
+            evaluate_test=False,
+            evaluate_holdout=False,
+            on_epoch_end=_on_epoch_end,
+        )
+
+        del model
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        return float(summary.get("val_best_f1", 0.0))
+
+    return objective
+
+
+# =============================================================================
+# EVALUATION UTILITIES
+# =============================================================================
+
+
+def get_class_name(
+    model_idx: int,
+    idx_to_class_id: Dict[int, int],
+    class_names: List[str],
+) -> str:
+    """Get class name from model index.
+
+    Args:
+        model_idx: Model's internal class index.
+        idx_to_class_id: Dict mapping model index to original class ID.
+        class_names: List of class names indexed by class ID.
+
+    Returns:
+        Class name string.
+    """
+    class_id = idx_to_class_id.get(model_idx, model_idx)
+    if class_id < len(class_names):
+        return class_names[class_id]
+    return f"Class_{class_id}"
+
+
+def compute_confused_pairs(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    top_n: int = 20,
+) -> List[Dict[str, int]]:
+    """Identify the most frequently confused class pairs from predictions.
+
+    Args:
+        y_true: Ground truth labels.
+        y_pred: Predicted labels.
+        top_n: Number of top confused pairs to return.
+
+    Returns:
+        List of dicts with 'true_class', 'pred_class', and 'count' keys,
+        sorted by count in descending order.
+    """
+    from sklearn.metrics import confusion_matrix as sklearn_cm
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    unique_classes = np.unique(np.concatenate([y_true, y_pred]))
+    cm = sklearn_cm(y_true, y_pred, labels=unique_classes)
+
+    confused_pairs = []
+    for i, true_cls in enumerate(unique_classes):
+        for j, pred_cls in enumerate(unique_classes):
+            if i != j and cm[i, j] > 0:
+                confused_pairs.append(
+                    {
+                        "true_class": int(true_cls),
+                        "pred_class": int(pred_cls),
+                        "count": int(cm[i, j]),
+                    }
+                )
+
+    confused_pairs.sort(key=lambda x: -x["count"])
+    return confused_pairs[:top_n]
+
+
+def prepare_lime_image(
+    ds: DeepLakeDataset,
+    idx: int,
+    preprocess_mode: str,
+    bbox_padding_ratio: float = 0.15,
+    pad_to_square: bool = True,
+) -> np.ndarray:
+    """Prepare a base image for LIME that matches training preprocessing.
+
+    Args:
+        ds: DeepLake dataset.
+        idx: Sample index in the dataset.
+        preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
+        bbox_padding_ratio: Padding ratio for bbox crop.
+        pad_to_square: Whether to pad the image to square.
+
+    Returns:
+        Preprocessed image as uint8 RGB numpy array.
+    """
+    sample = ds[int(idx)]
+    img = _ensure_uint8_rgb(sample["images"].numpy())
+
+    if preprocess_mode == "bbox_crop":
+        box = sample["boxes"].numpy()
+        img = apply_bbox_crop_optimized(img, box, padding_ratio=bbox_padding_ratio)
+        img = _ensure_uint8_rgb(img)
+
+    if pad_to_square:
+        img = _pad_to_square(img)
+
+    return img
