@@ -11,6 +11,7 @@ import shutil
 import sys
 import time
 from collections import defaultdict
+import optuna
 
 import numpy as np
 import pandas as pd
@@ -3578,3 +3579,8 @@ def make_experiment_runner(
         results=results,
         runs_dir=runs_dir,
     )
+
+
+# =============================================================================
+# HYPERPARAMETER TUNING UTILITIES
+# =============================================================================
