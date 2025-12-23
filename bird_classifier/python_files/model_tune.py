@@ -287,20 +287,19 @@ def export_experiments_for_github(
     runs_dir: Path = None,
     include_checkpoints: bool = False,
 ) -> Dict[str, bool]:
-    """
-    Export experiment results to a directory suitable for GitHub.
+    """Export experiment results to a directory suitable for GitHub.
 
     This exports lightweight files (config, history, summary) that can be
     committed to GitHub and downloaded in Colab to skip re-training.
 
     Args:
-        run_names: List of experiment names to export
-        output_dir: Directory to save exported files
-        runs_dir: Source runs directory (default: RUNS_DIR)
-        include_checkpoints: If True, also copy model checkpoints (large files!)
+        run_names: List of experiment names to export.
+        output_dir: Directory to save exported files.
+        runs_dir: Source runs directory. Defaults to RUNS_DIR.
+        include_checkpoints: If True, also copy model checkpoints (large files!).
 
     Returns:
-        Dict mapping run_name -> success status
+        Dict mapping run_name to success status (True if exported successfully).
     """
     runs_dir = runs_dir or RUNS_DIR
     output_dir = Path(output_dir)
@@ -1212,6 +1211,25 @@ class BirdDataset(Dataset):
         cache_version: str = "v1_uint8_rgb_pad_bbox",
         cache_namespace: str | None = None,
     ):
+        """Initialize the BirdDataset.
+
+        Args:
+            ds: DeepLake dataset containing images and bounding boxes.
+            indices: Array of dataset indices to include.
+            labels: Array of class labels corresponding to indices.
+            weights: EfficientNet weights containing preprocessing transforms.
+            preprocess_mode: 'native' or 'bbox_crop'. Defaults to 'native'.
+            bbox_padding_ratio: Padding around bbox as fraction. Defaults to 0.15.
+            pad_to_square: Whether to pad images to square. Defaults to True.
+            augmentation: Optional Albumentations compose pipeline.
+            return_index: If True, return (x, y, idx) instead of (x, y).
+            cache_dir: Directory for caching preprocessed images.
+            cache_version: Version string for cache invalidation.
+            cache_namespace: Optional namespace to distinguish datasets in cache.
+
+        Raises:
+            ValueError: If preprocess_mode is not 'native' or 'bbox_crop'.
+        """
         self.ds = ds
         self.indices = np.asarray(indices, dtype=int)
         self.labels = np.asarray(labels, dtype=int)
@@ -1239,6 +1257,9 @@ class BirdDataset(Dataset):
         Important: ds_train and ds_val share overlapping integer indices.
         If the cache key is only `idx`, images from different datasets will
         collide and silently produce garbage evaluation metrics.
+
+        Returns:
+            A 12-character hash string unique to this dataset's path.
         """
 
         if self.cache_namespace is not None:
@@ -1255,6 +1276,14 @@ class BirdDataset(Dataset):
         return f"ds_{digest}"
 
     def _cache_path(self, idx: int) -> Path | None:
+        """Get the cache file path for a given sample index.
+
+        Args:
+            idx: Dataset index of the sample.
+
+        Returns:
+            Path to the cached PNG file, or None if caching is disabled.
+        """
         if self.cache_dir is None:
             return None
         # Namespace cache by dataset to avoid ds_train vs ds_val collisions.
@@ -1270,11 +1299,21 @@ class BirdDataset(Dataset):
         return subdir / f"{idx}_pad{pad_flag}_p{pad_pct}.png"
 
     def __len__(self) -> int:
+        """Return the number of samples in the dataset."""
         return len(self.indices)
 
     def __getitem__(
         self, i: int
     ) -> Tuple[torch.Tensor, int] | Tuple[torch.Tensor, int, int]:
+        """Get a sample by index.
+
+        Args:
+            i: Index into the dataset (0 to len-1).
+
+        Returns:
+            Tuple of (image_tensor, label) if return_index is False,
+            or (image_tensor, label, dataset_index) if return_index is True.
+        """
         idx = int(self.indices[i])
 
         cache_path = self._cache_path(idx)
@@ -2682,7 +2721,15 @@ def train_two_stage(
     # HELPER FUNCTION: Create optimizer
     # ==========================================================================
     def create_optimizer(params, lr):
-        """Create optimizer based on config."""
+        """Create optimizer based on config.
+
+        Args:
+            params: Model parameters to optimize.
+            lr: Learning rate.
+
+        Returns:
+            Configured optimizer (AdamW or SGD).
+        """
         if cfg.optimizer == "sgd":
             return torch.optim.SGD(
                 params,
@@ -2701,7 +2748,16 @@ def train_two_stage(
     # HELPER FUNCTION: Create scheduler
     # ==========================================================================
     def create_scheduler(optimizer, epochs, steps_per_epoch):
-        """Create learning rate scheduler based on config."""
+        """Create learning rate scheduler based on config.
+
+        Args:
+            optimizer: Optimizer to schedule.
+            epochs: Number of epochs for this stage.
+            steps_per_epoch: Number of batches per epoch.
+
+        Returns:
+            Scheduler instance or None if scheduler='none'.
+        """
         if cfg.scheduler == "cosine":
             return CosineAnnealingLR(optimizer, T_max=epochs)
         elif cfg.scheduler == "onecycle":
@@ -2727,7 +2783,19 @@ def train_two_stage(
         epoch_offset: int = 0,
         scheduler=None,
     ) -> Path:
-        """Run one training stage and return path to best checkpoint."""
+        """Run one training stage and return path to best checkpoint.
+
+        Args:
+            stage_name: Name of the stage ('head' or 'finetune').
+            epochs: Number of epochs to train.
+            optimizer: Optimizer for this stage.
+            freeze_bn: Whether to keep BatchNorm in eval mode.
+            epoch_offset: Global epoch offset for logging.
+            scheduler: Learning rate scheduler (optional).
+
+        Returns:
+            Path to the best checkpoint file for this stage.
+        """
         best_f1 = -1.0
         best_path = run_dir / f"best_{stage_name}.pt"
         no_improve = 0
@@ -3616,20 +3684,20 @@ def create_tuning_subset(
     test_frac: float = 0.0,
     seed: int = 42,
 ) -> Tuple["SplitIndices", Dict[int, np.ndarray]]:
-    """
-    Create a stratified subset of training data for fast hyperparameter tuning.
+    """Create a stratified subset of training data for fast hyperparameter tuning.
 
     Args:
         train_label_index: Dict mapping class_id to array of dataset indices.
         class_id_to_idx: Dict mapping class_id to model index.
-        subset_frac: Fraction of data to use for tuning (default 20%).
-        val_frac: Fraction of subset for validation (default 20%).
-        test_frac: Fraction of subset for test (default 0% for speed).
-        seed: Random seed for reproducibility.
+        subset_frac: Fraction of data to use for tuning. Defaults to 0.20.
+        val_frac: Fraction of subset for validation. Defaults to 0.20.
+        test_frac: Fraction of subset for test. Defaults to 0.0 for speed.
+        seed: Random seed for reproducibility. Defaults to 42.
 
     Returns:
-        subset_splits: SplitIndices for the subset
-        subset_label_index: Reduced label index (for weighted sampler)
+        Tuple containing:
+            - subset_splits: SplitIndices for the subset
+            - subset_label_index: Reduced label index (for weighted sampler)
     """
     rng = np.random.default_rng(seed)
     subset_label_index = {}
@@ -3654,20 +3722,20 @@ def suggest_aug_params(trial: optuna.Trial) -> dict:
     """Suggest augmentation hyperparameters for Optuna.
 
     Augmentations searched:
-    - Horizontal flip: Safe for birds (left/right symmetry)
-    - ShiftScaleRotate: Scale (zoom) + rotation, no shift (bbox_crop centers bird)
-    - Brightness/Contrast: Lighting variation
-    - Hue/Saturation: Color variation (careful with plumage colors)
-    - CLAHE: Adaptive contrast (helps with shadowy/bright images)
-    - Blur: Simulates focus issues
-    - Noise: Simulates sensor noise
-    - Cutout: Occlusion regularization
+        - Horizontal flip: Safe for birds (left/right symmetry)
+        - ShiftScaleRotate: Scale (zoom) + rotation, no shift (bbox_crop centers bird)
+        - Brightness/Contrast: Lighting variation
+        - Hue/Saturation: Color variation (careful with plumage colors)
+        - CLAHE: Adaptive contrast (helps with shadowy/bright images)
+        - Blur: Simulates focus issues
+        - Noise: Simulates sensor noise
+        - Cutout: Occlusion regularization
 
     Args:
-        trial: Optuna trial object.
+        trial: Optuna trial object for suggesting hyperparameters.
 
     Returns:
-        Dict of augmentation parameters.
+        Dict of augmentation parameters with keys for each transform type.
     """
     return {
         # Horizontal flip
@@ -3711,16 +3779,19 @@ def aug_objective(
     """Optuna objective for augmentation search.
 
     Args:
-        trial: Optuna trial object
-        ds_train: DeepLake training dataset
-        tuning_label_index: Label index for the tuning subset
-        tuning_splits: Train/val splits for tuning
-        best_preprocess: Preprocessing mode to use
-        fast_head_epochs: Number of head training epochs
-        fast_finetune_epochs: Number of finetune epochs
+        trial: Optuna trial object.
+        ds_train: DeepLake training dataset.
+        tuning_label_index: Label index for the tuning subset.
+        tuning_splits: Train/val splits for tuning.
+        best_preprocess: Preprocessing mode to use ('native' or 'bbox_crop').
+        fast_head_epochs: Number of head training epochs.
+        fast_finetune_epochs: Number of finetune epochs.
 
     Returns:
-        Best validation F1 score
+        Best validation F1 score achieved during training.
+
+    Raises:
+        optuna.TrialPruned: If the trial is pruned during training.
     """
     aug_params = suggest_aug_params(trial)
 
