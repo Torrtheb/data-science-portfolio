@@ -1418,9 +1418,15 @@ def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
 
     if hasattr(torch, "compile") and torch.cuda.is_available():
         try:
-            # Fix TF32 API conflict: use only the new API consistently
+            # Fix TF32 API conflict: use the newest API (PyTorch 2.9+)
             # This prevents "mix of legacy and new APIs" error with inductor backend
-            torch.set_float32_matmul_precision("high")  # Enables TF32 for matmul
+            if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+                # New API (PyTorch 2.9+)
+                torch.backends.cuda.matmul.fp32_precision = "tf32"
+                torch.backends.cudnn.conv.fp32_precision = "tf32"
+            else:
+                # Fallback for older PyTorch versions
+                torch.set_float32_matmul_precision("high")
             
             compiled = torch.compile(model, mode="reduce-overhead")
             # Trigger compilation immediately so backend errors surface here
