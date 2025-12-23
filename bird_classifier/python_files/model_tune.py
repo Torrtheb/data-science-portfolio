@@ -1419,6 +1419,18 @@ def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
     if hasattr(torch, "compile") and torch.cuda.is_available():
         try:
             compiled = torch.compile(model, mode="reduce-overhead")
+            # Trigger compilation immediately so backend errors surface here
+            # (some failures happen on the first forward, not at compile() call time).
+            device = next(compiled.parameters()).device
+            dummy = torch.zeros((1, 3, 380, 380), device=device, dtype=torch.float32)
+            compiled.eval()
+            with torch.no_grad():
+                _ = compiled(dummy)
+                # Training path uses autocast; eval path often doesn't.
+                # Warm both to avoid surprise runtime failures.
+                with torch.amp.autocast("cuda"):
+                    _ = compiled(dummy)
+
             print("torch.compile enabled (10-30% speedup)")
             return compiled
         except Exception as e:
