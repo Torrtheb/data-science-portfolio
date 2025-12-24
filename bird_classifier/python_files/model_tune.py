@@ -1,17 +1,37 @@
+"""Model training and hyperparameter tuning utilities for bird classification.
+
+This module provides a complete pipeline for training EfficientNet-B4 models
+on the NABirds dataset using transfer learning. It includes:
+
+- Two-stage training: frozen backbone head training followed by full fine-tuning
+- Configurable image preprocessing with bounding box cropping and augmentation
+- Optuna-based hyperparameter optimization for augmentation and model parameters
+- Experiment tracking with checkpointing and result persistence
+- Evaluation utilities including confusion matrix analysis and LIME explanations
+
+Typical usage:
+    >>> from model_tune import (
+    ...     train_two_stage, TrainConfig, make_experiment_runner,
+    ...     BirdDataset, build_efficientnet_b4
+    ... )
+    >>> cfg = TrainConfig(run_name="experiment_1", preprocess_mode="bbox_crop")
+    >>> model, history, summary, run_dir = train_two_stage(cfg, ds_train, ...)
+
+Author: Benjamin Torra
+Date: December 2024
+"""
+
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple, Optional, Any, Callable, Mapping
 from pathlib import Path
 import hashlib
 import json
 import multiprocessing
-import os
 import platform
 import random
-import sys
 import time
 from collections import defaultdict
 import optuna
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -36,10 +56,8 @@ from sklearn.metrics import (
 
 import cv2
 import albumentations as A
-
 import deeplake
 
-# Type aliases for clarity
 DeepLakeDataset = deeplake.Dataset
 EfficientNetWeights = models.EfficientNet_B4_Weights
 
@@ -65,7 +83,6 @@ DEVICE = get_device()
 RUNS_DIR = Path("runs")
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Baseline config - can be overridden when calling train functions
 BASELINE_CONFIG = dict(
     batch_size=32,
     head_epochs=3,
@@ -136,7 +153,7 @@ class FocalLoss(nn.Module):
             Focal loss value
         """
         ce_loss = F.cross_entropy(inputs, targets, reduction="none")
-        pt = torch.exp(-ce_loss)  # pt = p if correct class
+        pt = torch.exp(-ce_loss) 
         focal_loss = ((1 - pt) ** self.gamma) * ce_loss
 
         if self.reduction == "mean":
@@ -157,7 +174,6 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    # Make deterministic (may slow down training slightly)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
@@ -235,8 +251,6 @@ def check_experiment_exists(run_name: str, runs_dir: Path = None) -> bool:
     for f in required_files:
         if not (run_dir / f).exists():
             return False
-
-    # At least one checkpoint must exist
     has_checkpoint = (run_dir / "best_head.pt").exists() or (
         run_dir / "best_finetune.pt"
     ).exists()
@@ -353,8 +367,6 @@ def _allocate_split_counts(
     n_val = max(1, int(round(val_frac * n)))
     n_test = max(1, int(round(test_frac * n)))
     n_train = n - n_val - n_test
-
-    # Ensure at least 2 training samples when possible
     if n_train < 2:
         deficit = 2 - n_train
         for _ in range(deficit):
@@ -533,8 +545,6 @@ def resolve_bbox_from_box_array(
 
     x1, y1, x2, y2 = box
     h, w = img_h, img_w
-
-    # Normalized corners (0-1 range)
     if 0 <= x1 <= 1 and 0 <= y1 <= 1 and 0 <= x2 <= 1 and 0 <= y2 <= 1:
         x1, y1, x2, y2 = x1 * w, y1 * h, x2 * w, y2 * h
     else:
@@ -548,8 +558,6 @@ def resolve_bbox_from_box_array(
         ):
             x2 = x1 + width
             y2 = y1 + height
-        # else assume already (x1, y1, x2, y2)
-
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w, x2), min(h, y2)
     if x2 <= x1 or y2 <= y1:
