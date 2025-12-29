@@ -1,0 +1,30 @@
+[project]
+name = "bird-classifier"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "albumentations>=2.0.8",
+    "black[jupyter]>=25.12.0",
+    "cv>=1.0.0",
+    "deeplake<4",
+    "flask>=3.1.2",
+    "imagehash>=4.3.2",
+    "ipykernel>=7.1.0",
+    "ipywidgets>=8.1.8",
+    "jupyter>=1.1.1",
+    "lime>=0.2.0.1",
+    "matplotlib>=3.10.7",
+    "opencv-python-headless>=4.12.0.88",
+    "optuna>=4.6.0",
+    "pandas>=2.3.3",
+    "phik>=0.12.5",
+    "scikit-image>=0.25.2",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
+    "torch>=2.9.1",
+    "torchvision>=0.24.1",
+    "umap-learn>=0.5.9.post2",
+    "widgetsnbextension>=4.0.15",
+]

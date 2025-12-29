@@ -1,0 +1,3818 @@
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Tuple, Optional, Any, Callable, Mapping
+from pathlib import Path
+import hashlib
+import json
+import multiprocessing
+import platform
+import random
+import time
+from collections import defaultdict
+import optuna
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image
+from tqdm.auto import tqdm
+from types import SimpleNamespace
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
+import torchvision.models as models
+
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    precision_recall_fscore_support,
+)
+
+import cv2
+import albumentations as A
+import deeplake
+
+DeepLakeDataset = deeplake.Dataset
+EfficientNetWeights = models.EfficientNet_B4_Weights
+
+# =============================================================================
+# MODULE-LEVEL CONSTANTS
+# =============================================================================
+
+
+def get_device() -> torch.device:
+    """Pick the best available device (CUDA → MPS → CPU).
+
+    Returns:
+        torch.device: The best available compute device.
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+DEVICE = get_device()
+RUNS_DIR = Path("runs")
+RUNS_DIR.mkdir(parents=True, exist_ok=True)
+
+BASELINE_CONFIG = dict(
+    batch_size=32,
+    head_epochs=3,
+    finetune_epochs=10,
+    lr_head=3e-3,
+    lr_backbone=3e-5,
+    lr_head_finetune=3e-4,
+    weight_decay=1e-4,
+    label_smoothing=0.0,
+    use_weighted_sampler=True,
+    use_amp=True,
+    use_torch_compile=True,
+    grad_clip_norm=1.0,
+    freeze_bn_head=True,
+    freeze_bn_finetune=True,
+    augmentation="none",
+    augmentation_params=None,
+    resume_head_ckpt=None,
+    bbox_padding_ratio=0.15,
+    pad_to_square=True,
+    cache_dir=None,
+    cache_version="v1_uint8_rgb_pad_bbox",
+    early_stop_patience=3,
+    seed=42,
+    optimizer="adamw",
+    momentum=0.9,
+    loss_fn="cross_entropy",
+    focal_gamma=2.0,
+    scheduler="none",
+    dropout=0.4,
+)
+
+
+# =============================================================================
+# FOCAL LOSS (for class imbalance)
+# =============================================================================
+
+
+class FocalLoss(nn.Module):
+    """Focal Loss for handling class imbalance.
+
+    Focal loss down-weights well-classified examples and focuses on hard,
+    misclassified examples. Particularly useful for datasets with many classes
+    where some classes have very few samples.
+
+    Reference: Lin et al., "Focal Loss for Dense Object Detection", ICCV 2017
+
+    Args:
+        gamma: Focusing parameter. Higher values give more weight to hard examples.
+               gamma=0 is equivalent to cross-entropy. Typical values: 1.0-3.0
+        alpha: Optional class weights (not used in this implementation).
+        reduction: 'mean' or 'sum' or 'none'
+    """
+
+    def __init__(self, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Compute focal loss.
+
+        Args:
+            inputs: Logits of shape (N, C) where C is number of classes
+            targets: Ground truth labels of shape (N,)
+
+        Returns:
+            Focal loss value
+        """
+        ce_loss = F.cross_entropy(inputs, targets, reduction="none")
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+
+        if self.reduction == "mean":
+            return focal_loss.mean()
+        elif self.reduction == "sum":
+            return focal_loss.sum()
+        return focal_loss
+
+
+def seed_everything(seed: int) -> None:
+    """Set all random seeds for reproducibility.
+
+    Args:
+        seed: Random seed value to use across all libraries.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+# =============================================================================
+# LABEL INDEX UTILITIES
+# =============================================================================
+
+
+def build_label_index(ds: DeepLakeDataset) -> Dict[int, np.ndarray]:
+    """Build a mapping from class labels to dataset indices.
+
+    Enables stratified splitting (same proportion of each class),
+    few-shot sampling (N images per class), and faster iteration.
+
+    Args:
+        ds: DeepLake dataset containing 'labels' tensor.
+
+    Returns:
+        Dict mapping class_label (int) to array of dataset indices.
+    """
+    label_to_idxs: Dict[int, list] = defaultdict(list)
+    for i, sample in tqdm(enumerate(ds), total=len(ds), desc="Building label index"):
+        label = int(sample["labels"].numpy()[0])
+        label_to_idxs[label].append(int(i))
+    return {k: np.array(v, dtype=np.int64) for k, v in label_to_idxs.items()}
+
+
+def save_label_index(label_index: Dict[int, np.ndarray], path: Path | str) -> None:
+    """Save label index to compressed numpy file.
+
+    Args:
+        label_index: Dict mapping class labels to index arrays.
+        path: File path for the output .npz file.
+    """
+    np.savez_compressed(path, **{str(k): v for k, v in label_index.items()})
+
+
+def load_label_index(path: Path | str) -> Dict[int, np.ndarray]:
+    """Load label index from numpy file.
+
+    Args:
+        path: Path to the .npz file containing the label index.
+
+    Returns:
+        Dict mapping class labels (int) to arrays of dataset indices.
+    """
+    data = np.load(path)
+    return {int(k): data[k] for k in data.files}
+
+
+# =============================================================================
+# EXPERIMENT PERSISTENCE (for resuming across Colab sessions)
+# =============================================================================
+
+
+def check_experiment_exists(run_name: str, runs_dir: Path = None) -> bool:
+    """Check if a completed experiment exists with all required files.
+
+    Args:
+        run_name: Name of the experiment to check.
+        runs_dir: Directory containing experiment runs. Defaults to RUNS_DIR.
+
+    Returns:
+        True if the experiment directory contains config.json, history.csv,
+        summary.json, and at least one checkpoint file.
+    """
+    runs_dir = runs_dir or RUNS_DIR
+    run_dir = runs_dir / run_name
+
+    if not run_dir.exists():
+        return False
+
+    required_files = ["config.json", "history.csv", "summary.json"]
+    for f in required_files:
+        if not (run_dir / f).exists():
+            return False
+    has_checkpoint = (run_dir / "best_head.pt").exists() or (
+        run_dir / "best_finetune.pt"
+    ).exists()
+    return has_checkpoint
+
+
+def load_experiment_results(
+    run_name: str, runs_dir: Path = None
+) -> Optional[Dict[str, Any]]:
+    """Load previously saved experiment results.
+
+    Args:
+        run_name: Name of the experiment to load.
+        runs_dir: Directory containing experiment runs. Defaults to RUNS_DIR.
+
+    Returns:
+        Dict with keys 'config', 'history_df', 'summary', 'run_dir',
+        or None if experiment doesn't exist or is incomplete.
+    """
+    runs_dir = runs_dir or RUNS_DIR
+    run_dir = runs_dir / run_name
+
+    if not check_experiment_exists(run_name, runs_dir):
+        return None
+
+    try:
+        config = json.loads((run_dir / "config.json").read_text())
+        history_df = pd.read_csv(run_dir / "history.csv")
+        summary = json.loads((run_dir / "summary.json").read_text())
+
+        return {
+            "config": config,
+            "history_df": history_df,
+            "summary": summary,
+            "run_dir": run_dir,
+        }
+    except Exception as e:
+        print(f"Warning: Failed to load experiment '{run_name}': {e}")
+        return None
+
+
+def get_completed_experiments(runs_dir: Path = None) -> List[str]:
+    """Get list of all completed experiment names in the runs directory.
+
+    Args:
+        runs_dir: Directory containing experiment runs. Defaults to RUNS_DIR.
+
+    Returns:
+        Sorted list of experiment names that have all required files.
+    """
+    runs_dir = runs_dir or RUNS_DIR
+    if not runs_dir.exists():
+        return []
+
+    completed = []
+    for run_dir in runs_dir.iterdir():
+        if run_dir.is_dir() and check_experiment_exists(run_dir.name, runs_dir):
+            completed.append(run_dir.name)
+
+    return sorted(completed)
+
+
+# =============================================================================
+# DATA SPLITTING
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class SplitIndices:
+    """Container for train/val/test split indices and labels."""
+
+    train_idx: np.ndarray
+    train_y: np.ndarray
+    val_idx: np.ndarray
+    val_y: np.ndarray
+    test_idx: np.ndarray
+    test_y: np.ndarray
+
+    def __repr__(self) -> str:
+        return (
+            f"SplitIndices(train={len(self.train_idx)}, "
+            f"val={len(self.val_idx)}, test={len(self.test_idx)})"
+        )
+
+
+def _allocate_split_counts(
+    n: int, val_frac: float, test_frac: float
+) -> Tuple[int, int, int]:
+    """Calculate how many samples go to train/val/test for a single class.
+
+    Handles edge cases for small classes:
+        - 1 sample → all to train
+        - 2 samples → 1 train, 1 val
+        - 3 samples → 1 each
+        - More → respect fractions with min 1 for val/test, min 2 for train
+
+    Args:
+        n: Total number of samples for the class.
+        val_frac: Fraction of samples for validation (0.0-1.0).
+        test_frac: Fraction of samples for test (0.0-1.0).
+
+    Returns:
+        Tuple of (n_train, n_val, n_test) sample counts that sum to n.
+    """
+    if n <= 0:
+        return 0, 0, 0
+    if n == 1:
+        return 1, 0, 0
+    if n == 2:
+        return 1, 1, 0
+    if n == 3:
+        return 1, 1, 1
+
+    n_val = max(1, int(round(val_frac * n)))
+    n_test = max(1, int(round(test_frac * n)))
+    n_train = n - n_val - n_test
+    if n_train < 2:
+        deficit = 2 - n_train
+        for _ in range(deficit):
+            if n_val >= n_test and n_val > 1:
+                n_val -= 1
+            elif n_test > 1:
+                n_test -= 1
+        n_train = n - n_val - n_test
+
+    return n_train, n_val, n_test
+
+
+def split_label_index_stratified(
+    label_index: Dict[int, np.ndarray],
+    class_id_to_idx: Dict[int, int],
+    val_frac: float = 0.15,
+    test_frac: float = 0.15,
+    seed: int = 42,
+) -> SplitIndices:
+    """Stratified 3-way split of dataset indices.
+
+    Each class gets approximately the same train/val/test ratio.
+    Small classes are handled specially to ensure minimum representation.
+
+    Args:
+        label_index: Dict mapping class_id → array of dataset indices.
+        class_id_to_idx: Dict mapping class_id → contiguous label (0, 1, 2, ...).
+        val_frac: Fraction for validation. Defaults to 0.15.
+        test_frac: Fraction for test. Defaults to 0.15.
+        seed: Random seed for reproducibility. Defaults to 42.
+
+    Returns:
+        SplitIndices with train/val/test indices and corresponding labels.
+
+    Raises:
+        ValueError: If val_frac or test_frac are out of valid range,
+            or if their sum is >= 1.0.
+    """
+    if not (0.0 < val_frac < 1.0):
+        raise ValueError("val_frac must be in (0, 1)")
+    if not (0.0 <= test_frac < 1.0):
+        raise ValueError("test_frac must be in [0, 1)")
+    if val_frac + test_frac >= 1.0:
+        raise ValueError("val_frac + test_frac must be < 1.0")
+
+    rng = np.random.default_rng(seed)
+
+    train_idx, train_y = [], []
+    val_idx, val_y = [], []
+    test_idx, test_y = [], []
+
+    for class_id in sorted(label_index.keys()):
+        idxs = np.asarray(label_index[class_id], dtype=int)
+        if idxs.size == 0:
+            continue
+        rng.shuffle(idxs)
+
+        n_train, n_val, n_test = _allocate_split_counts(len(idxs), val_frac, test_frac)
+
+        y = class_id_to_idx[int(class_id)]
+
+        train_idx.extend(idxs[:n_train].tolist())
+        train_y.extend([y] * n_train)
+
+        val_idx.extend(idxs[n_train : n_train + n_val].tolist())
+        val_y.extend([y] * n_val)
+
+        test_idx.extend(idxs[n_train + n_val : n_train + n_val + n_test].tolist())
+        test_y.extend([y] * n_test)
+
+    return SplitIndices(
+        train_idx=np.asarray(train_idx, dtype=int),
+        train_y=np.asarray(train_y, dtype=int),
+        val_idx=np.asarray(val_idx, dtype=int),
+        val_y=np.asarray(val_y, dtype=int),
+        test_idx=np.asarray(test_idx, dtype=int),
+        test_y=np.asarray(test_y, dtype=int),
+    )
+
+
+# =============================================================================
+# IMAGE PREPROCESSING UTILITIES
+# =============================================================================
+
+
+def _ensure_uint8_rgb(img: np.ndarray) -> np.ndarray:
+    """Convert any image format to uint8 RGB.
+
+    Args:
+        img: Input image as numpy array. Handles float (0-1 or 0-255),
+            grayscale (2D or 1 channel), and RGBA (4 channels).
+
+    Returns:
+        Contiguous uint8 RGB array with shape (H, W, 3).
+
+    Raises:
+        ValueError: If image has unexpected shape.
+    """
+    arr = np.asarray(img)
+    if arr.dtype != np.uint8:
+        max_val = float(arr.max()) if arr.size else 1.0
+        if max_val <= 1.0 + 1e-6:
+            arr = arr * 255.0
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+
+    if arr.ndim == 2:
+        arr = np.repeat(arr[:, :, None], 3, axis=2)
+    elif arr.ndim == 3 and arr.shape[2] == 1:
+        arr = np.repeat(arr, 3, axis=2)
+    elif arr.ndim == 3 and arr.shape[2] >= 3:
+        arr = arr[:, :, :3]
+    else:
+        raise ValueError(f"Unexpected image shape: {arr.shape}")
+
+    return np.ascontiguousarray(arr)
+
+
+def _pad_to_square(img: np.ndarray) -> np.ndarray:
+    """Pad image to square using reflection padding.
+
+    Preserves aspect ratio and avoids black borders.
+
+    Args:
+        img: Input image as numpy array with shape (H, W) or (H, W, C).
+
+    Returns:
+        Square image with reflection padding applied to shorter dimension.
+    """
+    h, w = img.shape[:2]
+    if h == w:
+        return img
+    if h > w:
+        pad = h - w
+        left = pad // 2
+        right = pad - left
+        top = bottom = 0
+    else:
+        pad = w - h
+        top = pad // 2
+        bottom = pad - top
+        left = right = 0
+    return cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_REFLECT_101)
+
+
+# =============================================================================
+# BOUNDING BOX UTILITIES (OPTIMIZED)
+# =============================================================================
+
+
+def resolve_bbox_from_box_array(
+    box: np.ndarray, img_h: int, img_w: int
+) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Convert bbox to pixel-space (x1, y1, x2, y2) clipped to image bounds.
+
+    OPTIMIZED: Takes pre-loaded box array and image dimensions to avoid
+    redundant image loading. Use this instead of resolve_bbox_xywh_or_xyxy()
+    when the image is already loaded.
+
+    Handles:
+    - Normalized xyxy (0-1 range)
+    - xywh format
+    - xyxy format
+
+    Args:
+        box: Bounding box array from dataset (shape [4,] or [1, 4])
+        img_h: Image height in pixels
+        img_w: Image width in pixels
+
+    Returns:
+        (x1, y1, x2, y2) in pixel coordinates, or None if invalid
+    """
+    box = np.asarray(box, dtype=float).squeeze()
+    if box.shape[-1] != 4:
+        return None
+
+    x1, y1, x2, y2 = box
+    h, w = img_h, img_w
+    if 0 <= x1 <= 1 and 0 <= y1 <= 1 and 0 <= x2 <= 1 and 0 <= y2 <= 1:
+        x1, y1, x2, y2 = x1 * w, y1 * h, x2 * w, y2 * h
+    else:
+        width, height = x2, y2
+        if (
+            width > 0
+            and height > 0
+            and x1 + width <= w + 1e-3
+            and y1 + height <= h + 1e-3
+        ):
+            x2 = x1 + width
+            y2 = y1 + height
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def apply_bbox_crop_optimized(
+    img: np.ndarray, box: np.ndarray, padding_ratio: float = 0.15
+) -> np.ndarray:
+    """
+    Crop to bounding box with padding.
+    Takes pre-loaded image and box array to avoid redundant DeepLake access.
+
+    Args:
+        img: Input image (H, W, C) as numpy array
+        box: Bounding box array from dataset
+        padding_ratio: Extra padding around bbox as fraction of bbox size (default 15%)
+
+    Returns:
+        Cropped image. If bbox is invalid, returns original image.
+    """
+    h, w = img.shape[:2]
+    bbox = resolve_bbox_from_box_array(box, h, w)
+    if bbox is None:
+        return img
+
+    x1, y1, x2, y2 = map(int, bbox)
+
+    box_w, box_h = x2 - x1, y2 - y1
+    pad_x = int(box_w * padding_ratio)
+    pad_y = int(box_h * padding_ratio)
+
+    # Calculate desired crop region (may extend beyond image)
+    crop_x1 = x1 - pad_x
+    crop_y1 = y1 - pad_y
+    crop_x2 = x2 + pad_x
+    crop_y2 = y2 + pad_y
+
+    # Calculate how much padding we need on each side
+    pad_left = max(0, -crop_x1)
+    pad_top = max(0, -crop_y1)
+    pad_right = max(0, crop_x2 - w)
+    pad_bottom = max(0, crop_y2 - h)
+
+    # Clip crop region to valid image bounds
+    crop_x1 = max(0, crop_x1)
+    crop_y1 = max(0, crop_y1)
+    crop_x2 = min(w, crop_x2)
+    crop_y2 = min(h, crop_y2)
+    if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+        return img
+
+    # Crop first
+    cropped = img[crop_y1:crop_y2, crop_x1:crop_x2]
+
+    # Add reflection padding if needed
+    if pad_left > 0 or pad_top > 0 or pad_right > 0 or pad_bottom > 0:
+        cropped = cv2.copyMakeBorder(
+            cropped, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_REFLECT_101
+        )
+
+    return cropped
+
+
+# =============================================================================
+# AUGMENTATION REGISTRY
+# =============================================================================
+
+AUGMENTATION_REGISTRY: Dict[str, Callable[[], A.Compose]] = {}
+
+
+def register_augmentation(name: str) -> Callable:
+    """Decorator to register an augmentation pipeline.
+
+    Args:
+        name: Unique name for the augmentation in the registry.
+
+    Returns:
+        Decorator function that registers the augmentation.
+    """
+
+    def decorator(func: Callable) -> Callable:
+        AUGMENTATION_REGISTRY[name] = func
+        return func
+
+    return decorator
+
+
+def get_augmentation(name: str) -> Optional[A.Compose]:
+    """Get an augmentation pipeline by name.
+
+    Args:
+        name: Name of the registered augmentation, or 'none'/None.
+
+    Returns:
+        Composed augmentation pipeline, or None if name is 'none'.
+
+    Raises:
+        ValueError: If name is not in the registry and not 'none'.
+    """
+    if name == "none" or name is None:
+        return None
+    if name not in AUGMENTATION_REGISTRY:
+        raise ValueError(
+            f"Unknown augmentation: {name}. Available: {list(AUGMENTATION_REGISTRY.keys())}"
+        )
+    return AUGMENTATION_REGISTRY[name]()
+
+
+class BackgroundSubtract(A.ImageOnlyTransform):
+    """Albumentations transform for background subtraction.
+
+    Applies Gaussian blur and subtracts from original to enhance foreground details.
+
+    Args:
+        sigma: Gaussian blur sigma. Defaults to 3.0.
+        strength: Subtraction strength factor. Defaults to 0.8.
+        p: Probability of applying transform. Defaults to 0.5.
+    """
+
+    def __init__(
+        self,
+        *,
+        sigma: float = 3.0,
+        strength: float = 0.8,
+        p: float = 0.5,
+    ):
+        super().__init__(p=p)
+        self.sigma = float(sigma)
+        self.strength = float(strength)
+
+    def apply(self, img: np.ndarray, **params) -> np.ndarray:
+        """Apply background subtraction to the image.
+
+        Args:
+            img: Input image as numpy array.
+            **params: Additional parameters from Albumentations.
+
+        Returns:
+            Transformed image with background subtracted.
+        """
+        sigma = max(self.sigma, 0.0)
+        if sigma <= 0:
+            return img
+
+        ksize = int(2 * round(3 * sigma) + 1)
+        if ksize % 2 == 0:
+            ksize += 1
+        ksize = max(ksize, 3)
+
+        blurred = cv2.GaussianBlur(img, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
+        out = (
+            img.astype(np.float32) - self.strength * blurred.astype(np.float32) + 128.0
+        )
+        return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def build_recipe_augmentation(params: Mapping[str, Any]) -> Optional[A.Compose]:
+    """
+    Build a parameterized augmentation recipe (Optuna-friendly).
+
+    Accepts multiple parameter name conventions for flexibility:
+    - p_flip / p_hflip: HorizontalFlip probability
+    - p_affine / p_rotate: ShiftScaleRotate probability
+    - shift_limit, scale_limit, rotate_limit: affine transform limits
+    - p_color / p_brightness_contrast: ColorJitter probability
+    - brightness / brightness_limit: brightness jitter range
+    - contrast / contrast_limit: contrast jitter range
+    - saturation / sat_shift: saturation jitter range
+    - hue / hue_shift: hue jitter range (note: hue_shift is int, scaled to 0-0.5)
+    - p_blur, blur_max / blur_limit: GaussianBlur settings
+    - p_noise, noise_std_max: GaussNoise settings
+    - p_dropout / p_cutout: CoarseDropout probability
+    - dropout_holes_max / cutout_holes: max number of dropout holes
+    - dropout_hole_min, dropout_hole_max / cutout_size: hole size range
+
+    Args:
+        params: Dictionary of augmentation parameters from Optuna or manual config.
+
+    Returns:
+        Composed augmentation pipeline, or None if no augmentations are enabled.
+    """
+    if not params:
+        return None
+
+    def _p(key: str, *alt_keys: str, default: float = 0.0) -> float:
+        """Get probability value from params, checking primary key then alternatives.
+
+        Args:
+            key: Primary parameter key to check.
+            *alt_keys: Alternative keys to check if primary is not found.
+            default: Default value if no key is found.
+
+        Returns:
+            Float probability value in range [0.0, 1.0].
+        """
+        try:
+            val = params.get(key)
+            if val is not None:
+                return float(val)
+            for alt in alt_keys:
+                val = params.get(alt)
+                if val is not None:
+                    return float(val)
+            return default
+        except Exception:
+            return default
+
+    def _f(key: str, *alt_keys: str, default: float = 0.0) -> float:
+        """Get float value from params, checking primary key then alternatives.
+
+        Args:
+            key: Primary parameter key to check.
+            *alt_keys: Alternative keys to check if primary is not found.
+            default: Default value if no key is found.
+
+        Returns:
+            Float parameter value.
+        """
+        return _p(key, *alt_keys, default=default)
+
+    def _i(key: str, *alt_keys: str, default: int = 0) -> int:
+        """Get integer value from params, checking primary key then alternatives.
+
+        Args:
+            key: Primary parameter key to check.
+            *alt_keys: Alternative keys to check if primary is not found.
+            default: Default value if no key is found.
+
+        Returns:
+            Integer parameter value.
+        """
+        try:
+            val = params.get(key)
+            if val is not None:
+                return int(val)
+            for alt in alt_keys:
+                val = params.get(alt)
+                if val is not None:
+                    return int(val)
+            return default
+        except Exception:
+            return default
+
+    ops: List[Any] = []
+    p_flip = _p("p_flip", "p_hflip")
+    if p_flip > 0:
+        ops.append(A.HorizontalFlip(p=min(max(p_flip, 0.0), 1.0)))
+    p_affine = _p("p_affine", "p_rotate")
+    if p_affine > 0:
+        shift_limit = _f("shift_limit", default=0.0)
+        scale_limit = _f("scale_limit", default=0.0)
+        rotate_limit = _f("rotate_limit", default=0.0)
+        ops.append(
+            A.Affine(
+                translate_percent=(
+                    {"x": (-shift_limit, shift_limit), "y": (-shift_limit, shift_limit)}
+                    if shift_limit > 0
+                    else {"x": 0, "y": 0}
+                ),
+                scale=(
+                    (1 - scale_limit, 1 + scale_limit)
+                    if scale_limit > 0
+                    else (1.0, 1.0)
+                ),
+                rotate=(-rotate_limit, rotate_limit) if rotate_limit > 0 else (0, 0),
+                shear={"x": 0, "y": 0},
+                border_mode=cv2.BORDER_REFLECT_101,
+                p=min(max(p_affine, 0.0), 1.0),
+            )
+        )
+
+    p_brightness_contrast = _p("p_brightness_contrast")
+    p_hue_sat = _p("p_hue_sat")
+    p_color = _p("p_color")
+    if p_brightness_contrast > 0 or p_hue_sat > 0:
+        # Brightness/Contrast only
+        if p_brightness_contrast > 0:
+            brightness = _f("brightness", "brightness_limit", default=0.1)
+            contrast = _f("contrast", "contrast_limit", default=0.1)
+            ops.append(
+                A.ColorJitter(
+                    brightness=brightness,
+                    contrast=contrast,
+                    saturation=0.0,
+                    hue=0.0,
+                    p=min(max(p_brightness_contrast, 0.0), 1.0),
+                )
+            )
+
+        # Hue/Saturation only
+        if p_hue_sat > 0:
+            hue = _f("hue", default=0.0)
+            if hue == 0.0:
+                hue_shift = _i("hue_shift", default=10)
+                hue = min(hue_shift / 180.0, 0.5)
+            saturation = _f("saturation", default=0.0)
+            if saturation == 0.0:
+                sat_shift = _i("sat_shift", default=15)
+                saturation = sat_shift / 100.0
+            elif saturation > 1.0:
+                saturation = saturation / 100.0
+            ops.append(
+                A.ColorJitter(
+                    brightness=0.0,
+                    contrast=0.0,
+                    saturation=saturation,
+                    hue=hue,
+                    p=min(max(p_hue_sat, 0.0), 1.0),
+                )
+            )
+    elif p_color > 0:
+        brightness = _f("brightness", "brightness_limit", default=0.0)
+        contrast = _f("contrast", "contrast_limit", default=0.0)
+        saturation = _f("saturation", "sat_shift", default=0.0)
+        hue = _f("hue", default=0.0)
+        if hue == 0.0:
+            hue_shift = _i("hue_shift", default=0)
+            if hue_shift > 0:
+                hue = min(hue_shift / 180.0, 0.5)
+        if saturation > 1.0:
+            saturation = saturation / 100.0
+        ops.append(
+            A.ColorJitter(
+                brightness=brightness,
+                contrast=contrast,
+                saturation=saturation,
+                hue=hue,
+                p=min(max(p_color, 0.0), 1.0),
+            )
+        )
+
+    # CLAHE
+    p_clahe = _p("p_clahe")
+    if p_clahe > 0:
+        clip_limit = _f("clahe_clip_limit", default=2.0)
+        tile_grid_size = _i("clahe_tile_grid_size", default=8)
+        ops.append(
+            A.CLAHE(
+                clip_limit=clip_limit,
+                tile_grid_size=(tile_grid_size, tile_grid_size),
+                p=min(max(p_clahe, 0.0), 1.0),
+            )
+        )
+
+    # BackgroundSubtract
+    p_bgsub = _p("p_bg_subtract")
+    if p_bgsub > 0:
+        sigma = _f("bg_sigma", default=3.0)
+        strength = _f("bg_strength", default=0.8)
+        ops.append(
+            BackgroundSubtract(
+                sigma=sigma,
+                strength=strength,
+                p=min(max(p_bgsub, 0.0), 1.0),
+            )
+        )
+
+    # GaussianBlur: blur_max or blur_limit
+    p_blur = _p("p_blur")
+    if p_blur > 0:
+        blur_max = _i("blur_max", "blur_limit", default=5)
+        blur_max = max(3, blur_max)
+        if blur_max % 2 == 0:
+            blur_max += 1
+        ops.append(
+            A.GaussianBlur(blur_limit=(3, blur_max), p=min(max(p_blur, 0.0), 1.0))
+        )
+
+    # GaussNoise
+    p_noise = _p("p_noise")
+    if p_noise > 0:
+        std_max = _f("noise_std_max", default=20.0)
+        if std_max > 1.0:
+            std_max = std_max / 255.0
+        std_max = min(max(std_max, 0.0), 1.0)
+        ops.append(
+            A.GaussNoise(std_range=(0.0, std_max), p=min(max(p_noise, 0.0), 1.0))
+        )
+
+    # CoarseDropout: p_dropout or p_cutout
+    p_dropout = _p("p_dropout", "p_cutout")
+    if p_dropout > 0:
+        holes_max = _i("dropout_holes_max", "cutout_holes", default=4)
+        cutout_size = _f("cutout_size", default=0.0)
+        hole_min = _f(
+            "dropout_hole_min", default=cutout_size if cutout_size > 0 else 0.05
+        )
+        hole_max = _f(
+            "dropout_hole_max", default=cutout_size if cutout_size > 0 else 0.15
+        )
+        if hole_min > hole_max:
+            hole_min, hole_max = hole_max, hole_min
+        ops.append(
+            A.CoarseDropout(
+                num_holes_range=(1, max(1, holes_max)),
+                hole_height_range=(hole_min, hole_max),
+                hole_width_range=(hole_min, hole_max),
+                p=min(max(p_dropout, 0.0), 1.0),
+            )
+        )
+
+    if not ops:
+        return None
+    return A.Compose(ops)
+
+
+def resolve_train_augmentation(
+    augmentation: str,
+    augmentation_params: Mapping[str, Any] | None = None,
+) -> Optional[A.Compose]:
+    """Resolve augmentation specification to a composed pipeline.
+
+    Args:
+        augmentation: One of 'none', a registry name, or 'recipe'.
+        augmentation_params: Parameters for 'recipe' augmentation.
+
+    Returns:
+        Composed augmentation pipeline, or None if 'none'.
+    """
+    if augmentation in {None, "none"}:
+        return None
+    if augmentation == "recipe":
+        return build_recipe_augmentation(augmentation_params or {})
+    return get_augmentation(augmentation)
+
+
+@register_augmentation("basic")
+def aug_basic() -> A.Compose:
+    """Basic augmentations: flip + slight color jitter.
+
+    Returns:
+        Composed augmentation pipeline with HorizontalFlip and ColorJitter.
+    """
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(
+                brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05, p=0.5
+            ),
+        ]
+    )
+
+
+@register_augmentation("moderate")
+def aug_moderate() -> A.Compose:
+    """Moderate augmentations: flip + color + rotation + blur.
+
+    Returns:
+        Composed augmentation pipeline with multiple transforms.
+    """
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.Rotate(limit=15, border_mode=cv2.BORDER_REFLECT_101, p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+            A.OneOf(
+                [
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                    A.MotionBlur(blur_limit=5, p=1.0),
+                ],
+                p=0.3,
+            ),
+        ]
+    )
+
+
+@register_augmentation("strong")
+def aug_strong() -> A.Compose:
+    """Strong augmentations: includes CoarseDropout, ShiftScale, etc.
+
+    Returns:
+        Composed augmentation pipeline with aggressive transforms.
+    """
+    return A.Compose(
+        [
+            A.HorizontalFlip(p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=0.1,
+                scale_limit=0.15,
+                rotate_limit=20,
+                border_mode=cv2.BORDER_REFLECT_101,
+                p=0.5,
+            ),
+            A.ColorJitter(
+                brightness=0.3, contrast=0.3, saturation=0.3, hue=0.15, p=0.7
+            ),
+            A.OneOf(
+                [
+                    A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+                    A.MotionBlur(blur_limit=7, p=1.0),
+                    A.GaussNoise(std_range=(10, 30), p=1.0),
+                ],
+                p=0.4,
+            ),
+            A.CoarseDropout(
+                num_holes_range=(1, 4),
+                hole_height_range=(0.05, 0.15),
+                hole_width_range=(0.05, 0.15),
+                p=0.3,
+            ),
+        ]
+    )
+
+
+# =============================================================================
+# DATASET CLASS (OPTIMIZED)
+# =============================================================================
+
+
+class BirdDataset(Dataset):
+    """PyTorch Dataset for bird classification with EfficientNet-B4.
+
+    Preprocessing modes:
+    - 'native': Optional pad-to-square → EfficientNet weights.transforms()
+    - 'bbox_crop': Bbox crop (+padding) → Optional pad-to-square → weights.transforms()
+
+    Caching (optional):
+    - Caches ONLY the deterministic base image after (optional) bbox-crop + (optional) pad-to-square.
+    - Augmentations are NOT cached (they stay random each epoch).
+
+    OPTIMIZATION: Uses apply_bbox_crop_optimized() to avoid redundant DeepLake
+    image loading. The image and box are loaded once per sample.
+    """
+
+    def __init__(
+        self,
+        ds: DeepLakeDataset,
+        indices: np.ndarray,
+        labels: np.ndarray,
+        weights: EfficientNetWeights,
+        preprocess_mode: str = "native",
+        bbox_padding_ratio: float = 0.15,
+        pad_to_square: bool = True,
+        augmentation: Optional[A.Compose] = None,
+        return_index: bool = False,
+        cache_dir: Path | None = None,
+        cache_version: str = "v1_uint8_rgb_pad_bbox",
+        cache_namespace: str | None = None,
+    ):
+        """Initialize the BirdDataset.
+
+        Args:
+            ds: DeepLake dataset containing images and bounding boxes.
+            indices: Array of dataset indices to include.
+            labels: Array of class labels corresponding to indices.
+            weights: EfficientNet weights containing preprocessing transforms.
+            preprocess_mode: 'native' or 'bbox_crop'. Defaults to 'native'.
+            bbox_padding_ratio: Padding around bbox as fraction. Defaults to 0.15.
+            pad_to_square: Whether to pad images to square. Defaults to True.
+            augmentation: Optional Albumentations compose pipeline.
+            return_index: If True, return (x, y, idx) instead of (x, y).
+            cache_dir: Directory for caching preprocessed images.
+            cache_version: Version string for cache invalidation.
+            cache_namespace: Optional namespace to distinguish datasets in cache.
+
+        Raises:
+            ValueError: If preprocess_mode is not 'native' or 'bbox_crop'.
+        """
+        self.ds = ds
+        self.indices = np.asarray(indices, dtype=int)
+        self.labels = np.asarray(labels, dtype=int)
+
+        self.preprocess_mode = preprocess_mode
+        self.bbox_padding_ratio = float(bbox_padding_ratio)
+        self.pad_to_square = bool(pad_to_square)
+        self.augmentation = augmentation
+        self.return_index = bool(return_index)
+
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self.cache_version = str(cache_version)
+        self.cache_namespace = (
+            str(cache_namespace) if cache_namespace is not None else None
+        )
+
+        if preprocess_mode not in {"native", "bbox_crop"}:
+            raise ValueError("preprocess_mode must be 'native' or 'bbox_crop'")
+
+        self.model_transform = weights.transforms()
+
+    def _dataset_cache_namespace(self) -> str:
+        """Return a stable, filesystem-safe cache namespace for the dataset.
+
+        Important: ds_train and ds_val share overlapping integer indices.
+        If the cache key is only `idx`, images from different datasets will
+        collide and silently produce garbage evaluation metrics.
+
+        Returns:
+            A 12-character hash string unique to this dataset's path.
+        """
+
+        if self.cache_namespace is not None:
+            return self.cache_namespace
+        ds_path = getattr(self.ds, "path", None)
+        if not ds_path:
+            ds_path = f"{type(self.ds).__name__}:{len(self.ds)}"
+
+        digest = hashlib.sha1(str(ds_path).encode("utf-8")).hexdigest()[:12]
+        return f"ds_{digest}"
+
+    def _cache_path(self, idx: int) -> Path | None:
+        """Get the cache file path for a given sample index.
+
+        Args:
+            idx: Dataset index of the sample.
+
+        Returns:
+            Path to the cached PNG file, or None if caching is disabled.
+        """
+        if self.cache_dir is None:
+            return None
+        subdir = (
+            self.cache_dir
+            / self.cache_version
+            / self._dataset_cache_namespace()
+            / self.preprocess_mode
+        )
+        subdir.mkdir(parents=True, exist_ok=True)
+        pad_flag = 1 if self.pad_to_square else 0
+        pad_pct = int(round(self.bbox_padding_ratio * 1000))
+        return subdir / f"{idx}_pad{pad_flag}_p{pad_pct}.png"
+
+    def __len__(self) -> int:
+        """Return the number of samples in the dataset."""
+        return len(self.indices)
+
+    def __getitem__(
+        self, i: int
+    ) -> Tuple[torch.Tensor, int] | Tuple[torch.Tensor, int, int]:
+        """Get a sample by index.
+
+        Args:
+            i: Index into the dataset (0 to len-1).
+
+        Returns:
+            Tuple of (image_tensor, label) if return_index is False,
+            or (image_tensor, label, dataset_index) if return_index is True.
+        """
+        idx = int(self.indices[i])
+
+        cache_path = self._cache_path(idx)
+        img = None
+
+        if cache_path is not None and cache_path.exists():
+            try:
+                img = _ensure_uint8_rgb(np.array(Image.open(cache_path).convert("RGB")))
+            except (OSError, IOError) as e:
+                try:
+                    cache_path.unlink()
+                except Exception:
+                    pass
+                img = None
+
+        if img is None:
+            sample = self.ds[idx]
+            img = _ensure_uint8_rgb(sample["images"].numpy())
+
+            if self.preprocess_mode == "bbox_crop":
+                box = sample["boxes"].numpy()
+                img = apply_bbox_crop_optimized(
+                    img, box, padding_ratio=self.bbox_padding_ratio
+                )
+                img = _ensure_uint8_rgb(img)
+
+            if self.pad_to_square:
+                img = _pad_to_square(img)
+
+            if cache_path is not None:
+                try:
+                    Image.fromarray(img).save(cache_path, format="PNG")
+                except Exception:
+                    pass
+        if self.augmentation is not None:
+            img = self.augmentation(image=img)["image"]
+            img = _ensure_uint8_rgb(img)
+
+        x = self.model_transform(Image.fromarray(img))
+        y = int(self.labels[i])
+        if self.return_index:
+            return x, y, idx
+        return x, y
+
+
+# =============================================================================
+# MODEL BUILDING
+# =============================================================================
+
+
+def build_efficientnet_b4(
+    num_classes: int, dropout: float = 0.4
+) -> Tuple[nn.Module, EfficientNetWeights]:
+    """Build EfficientNet-B4 with a new classification head.
+
+    Architecture:
+    - Backbone: EfficientNet-B4 pretrained on ImageNet
+    - Classifier: Dropout(dropout) → Linear(1792 → num_classes)
+
+    Args:
+        num_classes: Number of output classes for the classifier.
+        dropout: Dropout rate for the classifier head (0.0-1.0).
+
+    Returns:
+        Tuple of (model, weights) where weights contains preprocessing transforms.
+    """
+    weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
+    model = models.efficientnet_b4(weights=weights)
+
+    in_features = model.classifier[-1].in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=dropout, inplace=True),
+        nn.Linear(in_features, num_classes),
+    )
+
+    return model, weights
+
+
+def freeze_backbone(model: nn.Module) -> None:
+    """Freeze all layers except the classifier head.
+
+    Used in Stage 1 of training to train only the randomly initialized head
+    while keeping pretrained backbone weights fixed.
+
+    Args:
+        model: EfficientNet model with classifier attribute.
+    """
+    for p in model.parameters():
+        p.requires_grad = False
+    for p in model.classifier.parameters():
+        p.requires_grad = True
+
+
+def unfreeze_all(model: nn.Module) -> None:
+    """Unfreeze all layers for fine-tuning.
+
+    Args:
+        model: PyTorch model to unfreeze.
+    """
+    for p in model.parameters():
+        p.requires_grad = True
+
+
+def set_batchnorm_eval(module: nn.Module) -> None:
+    """Set BatchNorm layers to eval mode (keeps running stats frozen).
+
+    Args:
+        module: PyTorch module to check and potentially set to eval.
+    """
+    if isinstance(module, nn.modules.batchnorm._BatchNorm):
+        module.eval()
+
+
+# =============================================================================
+# OPTIONAL: torch.compile() for PyTorch 2.0+
+# =============================================================================
+
+
+def maybe_compile_model(model: nn.Module, enable: bool = True) -> nn.Module:
+    """Compile model with torch.compile for 10-30% speedup (PyTorch 2.0+).
+
+    Falls back gracefully on older versions or unsupported platforms.
+
+    Args:
+        model: PyTorch model to compile.
+        enable: Whether to attempt compilation. Defaults to True.
+
+    Returns:
+        Compiled model if successful, original model otherwise.
+    """
+    if not enable:
+        return model
+
+    if hasattr(torch, "compile") and torch.cuda.is_available():
+        try:
+            if hasattr(torch.backends.cuda.matmul, "fp32_precision"):
+                torch.backends.cuda.matmul.fp32_precision = "tf32"
+                torch.backends.cudnn.conv.fp32_precision = "tf32"
+            else:
+                torch.set_float32_matmul_precision("high")
+
+            compiled = torch.compile(model, mode="reduce-overhead")
+            device = next(compiled.parameters()).device
+            dummy = torch.zeros((1, 3, 380, 380), device=device, dtype=torch.float32)
+            compiled.eval()
+            with torch.no_grad():
+                _ = compiled(dummy)
+                with torch.amp.autocast("cuda"):
+                    _ = compiled(dummy)
+
+            print("torch.compile enabled")
+            return compiled
+        except Exception as e:
+            print(f"torch.compile failed, using eager mode: {e}")
+            return model
+    return model
+
+
+# =============================================================================
+# TRAINING UTILITIES
+# =============================================================================
+
+
+def make_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
+    """Create a weighted sampler for class imbalance.
+
+    Classes with fewer samples get higher sampling probability,
+    ensuring each class is seen roughly equally often per epoch.
+
+    Args:
+        labels: Array of class labels for each sample.
+
+    Returns:
+        WeightedRandomSampler configured for balanced sampling.
+    """
+    labels = np.asarray(labels, dtype=int)
+    counts = np.bincount(labels)
+    counts[counts == 0] = 1
+    class_weights = 1.0 / counts
+    sample_weights = class_weights[labels]
+
+    return WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+
+
+def make_dataloader(
+    dataset: Dataset,
+    batch_size: int,
+    shuffle: bool = False,
+    sampler: Optional[WeightedRandomSampler] = None,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Create a DataLoader with appropriate settings.
+
+    Args:
+        dataset: PyTorch Dataset to load from.
+        batch_size: Number of samples per batch.
+        shuffle: Whether to shuffle. Ignored if sampler is provided.
+        sampler: Optional weighted sampler for class balancing.
+        num_workers: Number of worker processes. Use 0 for DeepLake without
+            caching, or 4 when using cached PNG files for ~3x speedup.
+
+    Returns:
+        Configured DataLoader ready for training or evaluation.
+    """
+    mp_context = None
+    if num_workers > 0 and platform.system() == "Linux":
+        mp_context = multiprocessing.get_context("spawn")
+
+    return DataLoader(
+        dataset,
+        batch_size=max(1, int(batch_size)),
+        shuffle=(shuffle if sampler is None else False),
+        sampler=sampler,
+        num_workers=num_workers,
+        pin_memory=torch.cuda.is_available(),
+        persistent_workers=False,
+        prefetch_factor=2 if num_workers > 0 else None,
+        multiprocessing_context=mp_context,
+    )
+
+
+def compute_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
+    """Compute classification metrics.
+
+    Args:
+        y_true: Ground truth labels.
+        y_pred: Predicted labels.
+
+    Returns:
+        Dict with 'acc', 'precision', 'recall', and 'f1' (macro-averaged).
+    """
+    prec, rec, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="macro", zero_division=0
+    )
+    acc = accuracy_score(y_true, y_pred)
+    return {
+        "acc": float(acc),
+        "precision": float(prec),
+        "recall": float(rec),
+        "f1": float(f1),
+    }
+
+
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    criterion: nn.Module,
+) -> Dict[str, float]:
+    """Evaluate model on a dataloader.
+
+    Args:
+        model: PyTorch model to evaluate.
+        loader: DataLoader yielding (inputs, labels) batches.
+        device: Device to run evaluation on.
+        criterion: Loss function for computing loss.
+
+    Returns:
+        Dict with 'loss', 'acc', 'precision', 'recall', and 'f1' metrics.
+    """
+    model.eval()
+    total_loss = 0.0
+    n = 0
+    y_true, y_pred = [], []
+
+    for batch in loader:
+        x, y = batch[0], batch[1]
+        x, y = x.to(device), y.to(device)
+        logits = model(x)
+        loss = criterion(logits, y)
+
+        bs = x.shape[0]
+        total_loss += float(loss.item()) * bs
+        n += bs
+
+        y_true.extend(y.cpu().tolist())
+        y_pred.extend(logits.argmax(dim=1).cpu().tolist())
+
+    metrics = compute_metrics(y_true, y_pred)
+    metrics["loss"] = total_loss / max(1, n)
+    return metrics
+
+
+@torch.no_grad()
+def evaluate_with_preds(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    criterion: nn.Module,
+    topk: int = 5,
+) -> Tuple[Dict[str, float], List[int], List[int], List[int] | None]:
+    """Evaluate model and return predictions for detailed analysis.
+
+    Args:
+        model: PyTorch model to evaluate.
+        loader: DataLoader yielding (inputs, labels[, indices]) batches.
+        device: Device to run evaluation on.
+        criterion: Loss function for computing loss.
+        topk: Number of top predictions to consider for top-k accuracy.
+
+    Returns:
+        Tuple of (metrics_dict, y_true, y_pred, sample_indices).
+        metrics_dict includes 'loss', 'acc', 'precision', 'recall', 'f1', 'top5_acc'.
+        sample_indices is None if loader doesn't return indices.
+    """
+    model.eval()
+    total_loss = 0.0
+    n = 0
+    topk_correct = 0
+    y_true, y_pred = [], []
+    indices: List[int] | None = []
+
+    for batch in loader:
+        x, y = batch[0], batch[1]
+        idx = batch[2] if len(batch) >= 3 else None
+        x, y = x.to(device), y.to(device)
+        logits = model(x)
+        loss = criterion(logits, y)
+
+        bs = x.shape[0]
+        total_loss += float(loss.item()) * bs
+        n += bs
+
+        y_true.extend(y.cpu().tolist())
+        y_pred.extend(logits.argmax(dim=1).cpu().tolist())
+        if indices is not None:
+            if idx is None:
+                indices = None
+            else:
+                if torch.is_tensor(idx):
+                    indices.extend([int(v) for v in idx.cpu().tolist()])
+                else:
+                    indices.extend([int(v) for v in idx])
+
+        k = int(min(max(1, topk), logits.shape[1]))
+        topk_idx = logits.topk(k=k, dim=1).indices
+        topk_correct += int((topk_idx == y[:, None]).any(dim=1).sum().item())
+
+    metrics = compute_metrics(y_true, y_pred)
+    metrics["loss"] = total_loss / max(1, n)
+    metrics["top5_acc"] = float(topk_correct / max(1, n))
+    return metrics, y_true, y_pred, indices
+
+
+def train_one_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    use_amp: bool = True,
+    grad_clip_norm: float = 1.0,
+    freeze_bn: bool = True,
+    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
+    scheduler_step_per_batch: bool = False,
+) -> Dict[str, float]:
+    """Train model for one epoch.
+
+    Args:
+        model: PyTorch model to train.
+        loader: DataLoader yielding (inputs, labels) batches.
+        device: Device to run training on.
+        criterion: Loss function.
+        optimizer: Optimizer for parameter updates.
+        use_amp: Whether to use automatic mixed precision. Defaults to True.
+        grad_clip_norm: Maximum gradient norm for clipping. Defaults to 1.0.
+        freeze_bn: Whether to keep BatchNorm in eval mode. Defaults to True.
+        scheduler: Optional learning rate scheduler.
+        scheduler_step_per_batch: If True, step scheduler after each batch (for OneCycleLR).
+
+    Returns:
+        Dict with 'loss', 'acc', 'precision', 'recall', and 'f1' metrics.
+    """
+    model.train()
+
+    # Keep BatchNorm in eval mode if requested
+    if freeze_bn:
+        model.apply(set_batchnorm_eval)
+
+    scaler = (
+        torch.amp.GradScaler("cuda") if (use_amp and device.type == "cuda") else None
+    )
+
+    total_loss = 0.0
+    n = 0
+    y_true, y_pred = [], []
+
+    # GPU memory debugging
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        allocated = torch.cuda.memory_allocated() / 1e9
+        reserved = torch.cuda.memory_reserved() / 1e9
+        print(
+            f"    GPU Memory: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved",
+            flush=True,
+        )
+
+    print("    Loading first batch...", flush=True)
+    pbar = tqdm(loader, desc="Train", leave=False)
+    first_batch = True
+    for batch in pbar:
+        x, y = batch[0], batch[1]
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad(set_to_none=True)
+
+        if scaler is not None:
+            with torch.amp.autocast("cuda"):
+                logits = model(x)
+                loss = criterion(logits, y)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            old_scale = scaler.get_scale()
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer_stepped = scaler.get_scale() >= old_scale
+        else:
+            logits = model(x)
+            loss = criterion(logits, y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+            optimizer.step()
+            optimizer_stepped = True
+
+        if first_batch and device.type == "cuda":
+            peak_mem = torch.cuda.max_memory_allocated() / 1e9
+            print(
+                f"    First batch complete. Peak GPU memory: {peak_mem:.2f}GB",
+                flush=True,
+            )
+            first_batch = False
+
+        bs = x.shape[0]
+        total_loss += float(loss.item()) * bs
+        n += bs
+        y_true.extend(y.cpu().tolist())
+        y_pred.extend(logits.argmax(dim=1).cpu().tolist())
+
+        # Step scheduler per-batch (for OneCycleLR) - only if optimizer stepped
+        if scheduler is not None and scheduler_step_per_batch and optimizer_stepped:
+            scheduler.step()
+
+        pbar.set_postfix(loss=total_loss / n)
+
+    metrics = compute_metrics(y_true, y_pred)
+    metrics["loss"] = total_loss / max(1, n)
+    return metrics
+
+
+# =============================================================================
+# EVALUATION UTILITIES: Training Curves, Confusion Matrix, Classification Report
+# =============================================================================
+
+
+def plot_evaluation_suite(
+    history_df: pd.DataFrame,
+    y_true: List[int],
+    y_pred: List[int],
+    class_ids: List[int],
+    run_name: str = "",
+    *,
+    ds: Optional[DeepLakeDataset] = None,
+    sample_indices: List[int] | None = None,
+    id_to_name: Dict[int, str] | None = None,
+    train_label_index: Dict[int, np.ndarray] | None = None,
+    top_n_cm_classes: int = 20,
+    top_n_pairs: int = 5,
+    images_per_pair: int = 3,
+    figsize: Tuple[int, int] = (18, 10),
+) -> None:
+    """
+    Comprehensive evaluation visualization after training.
+
+    Displays:
+    1. Training curves (loss, accuracy, F1)
+    2. Confusion matrix (top confused classes)
+    3. Classification report summary (worst performing classes)
+
+    Args:
+        history_df: Training history DataFrame with columns:
+                    [stage, epoch, global_epoch, train_loss, val_loss, train_acc, val_acc, train_f1, val_f1]
+        y_true: True labels from evaluation
+        y_pred: Predicted labels from evaluation
+        class_ids: List of class IDs (maps index back to original class ID)
+        run_name: Experiment name for title
+        id_to_name: Optional mapping from class_id to species name
+        train_label_index: Optional label index for finding reference images of predicted class
+        top_n_cm_classes: Number of classes to show in confusion matrix detail
+        top_n_pairs: Number of confused pairs to show
+        images_per_pair: Number of example images per confused pair
+        figsize: Figure size
+    """
+    report = classification_report(
+        y_true,
+        y_pred,
+        labels=list(range(len(class_ids))),
+        output_dict=True,
+        zero_division=0,
+    )
+
+    acc = float(accuracy_score(y_true, y_pred))
+    macro_prec = float(report["macro avg"]["precision"])
+    macro_rec = float(report["macro avg"]["recall"])
+    macro_f1 = float(report["macro avg"]["f1-score"])
+    weighted_f1 = float(report["weighted avg"]["f1-score"])
+
+    best_epoch = int(history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"])
+    best_f1 = float(history_df["val_f1"].max())
+
+    summary_df = pd.DataFrame(
+        [
+            ("Accuracy", acc),
+            ("Macro Precision", macro_prec),
+            ("Macro Recall", macro_rec),
+            ("Macro F1", macro_f1),
+            ("Weighted F1", weighted_f1),
+            ("Samples", int(len(y_true))),
+            ("Classes", int(len(class_ids))),
+            (
+                "Classes with F1=0",
+                int(
+                    sum(
+                        1
+                        for i in range(len(class_ids))
+                        if report.get(str(i), {}).get("f1-score", 1.0) == 0
+                    )
+                ),
+            ),
+            ("Best Val F1", best_f1),
+            ("Best Val F1 Epoch", best_epoch),
+        ],
+        columns=["Metric", "Value"],
+    )
+
+    print("\nEvaluation Summary")
+    with pd.option_context("display.max_rows", 200, "display.max_colwidth", 120):
+        print(summary_df.to_string(index=False))
+
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(2, 3, height_ratios=[1, 1.35], hspace=0.35, wspace=0.3)
+
+    epochs = history_df["global_epoch"]
+    head_epochs = (
+        history_df[history_df["stage"] == "head"]["global_epoch"].max()
+        if "head" in history_df["stage"].values
+        else 0
+    )
+
+    train_color = "#2ecc71"
+    val_color = "#e74c3c"
+    val_prec_color = "#3498db"
+    val_rec_color = "#f39c12"
+
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax1.plot(
+        epochs,
+        history_df["train_loss"],
+        label="Train",
+        color=train_color,
+        marker="o",
+        markersize=4,
+        linewidth=2,
+    )
+    ax1.plot(
+        epochs,
+        history_df["val_loss"],
+        label="Val",
+        color=val_color,
+        marker="s",
+        markersize=4,
+        linewidth=2,
+    )
+    if head_epochs > 0:
+        ax1.axvline(
+            x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+        )
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.set_title("Loss", fontweight="bold")
+    ax1.legend(loc="upper right", fontsize=9)
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax2.plot(
+        epochs,
+        history_df["train_acc"],
+        label="Train",
+        color=train_color,
+        marker="o",
+        markersize=4,
+        linewidth=2,
+    )
+    ax2.plot(
+        epochs,
+        history_df["val_acc"],
+        label="Val",
+        color=val_color,
+        marker="s",
+        markersize=4,
+        linewidth=2,
+    )
+    if head_epochs > 0:
+        ax2.axvline(
+            x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+        )
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Accuracy")
+    ax2.set_title("Accuracy", fontweight="bold")
+    ax2.legend(loc="lower right", fontsize=9)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(0, 1)
+
+    ax3 = fig.add_subplot(gs[0, 2])
+    ax3.plot(
+        epochs,
+        history_df["train_f1"],
+        label="Train F1",
+        color=train_color,
+        marker="o",
+        markersize=4,
+        linewidth=2,
+    )
+    ax3.plot(
+        epochs,
+        history_df["val_f1"],
+        label="Val F1",
+        color=val_color,
+        marker="s",
+        markersize=4,
+        linewidth=2,
+    )
+
+    if "train_precision" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["train_precision"],
+            label="Train Precision",
+            color=train_color,
+            linestyle="--",
+            linewidth=1.8,
+            alpha=0.8,
+        )
+    if "train_recall" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["train_recall"],
+            label="Train Recall",
+            color=train_color,
+            linestyle=":",
+            linewidth=1.8,
+            alpha=0.8,
+        )
+    if "val_precision" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["val_precision"],
+            label="Val Precision",
+            color=val_prec_color,
+            linestyle="--",
+            linewidth=2,
+        )
+    if "val_recall" in history_df.columns:
+        ax3.plot(
+            epochs,
+            history_df["val_recall"],
+            label="Val Recall",
+            color=val_rec_color,
+            linestyle="--",
+            linewidth=2,
+        )
+
+    if head_epochs > 0:
+        ax3.axvline(
+            x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+        )
+    ax3.set_xlabel("Epoch")
+    ax3.set_ylabel("Macro Score")
+    ax3.set_title("Macro F1 / Precision / Recall", fontweight="bold")
+    ax3.legend(loc="lower right", fontsize=8)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_ylim(0, 1)
+
+    ax3.axvline(x=best_epoch, color="#9b59b6", linestyle=":", alpha=0.8, linewidth=2)
+    ax3.scatter([best_epoch], [best_f1], color="#9b59b6", s=80, zorder=5, marker="o")
+
+    ax6 = fig.add_subplot(gs[1, :])
+
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(class_ids))))
+    confused_pairs = []
+    for i in range(len(class_ids)):
+        for j in range(len(class_ids)):
+            if i != j and cm[i, j] > 0:
+                confused_pairs.append((i, j, int(cm[i, j])))
+    confused_pairs_sorted = sorted(confused_pairs, key=lambda x: -x[2])
+
+    top_pairs = confused_pairs_sorted[: max(0, int(top_n_pairs))]
+
+    confused_class_idxs = set()
+    for true_i, pred_i, _ in confused_pairs_sorted[: max(0, int(top_n_cm_classes))]:
+        confused_class_idxs.add(true_i)
+        confused_class_idxs.add(pred_i)
+
+    if not confused_class_idxs:
+        confused_class_idxs = set(range(min(int(top_n_cm_classes), len(class_ids))))
+
+    confused_class_idxs = sorted(confused_class_idxs)[
+        : max(2, int(min(top_n_cm_classes, len(class_ids))))
+    ]
+
+    cm_subset = cm[np.ix_(confused_class_idxs, confused_class_idxs)]
+    tick_labels = [str(class_ids[i]) for i in confused_class_idxs]
+
+    sns.heatmap(
+        cm_subset,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        ax=ax6,
+        xticklabels=tick_labels,
+        yticklabels=tick_labels,
+        cbar_kws={"label": "Count"},
+    )
+    ax6.set_xlabel("Predicted Class ID", fontsize=10)
+    ax6.set_ylabel("True Class ID", fontsize=10)
+    ax6.set_title(
+        f"Confusion Matrix for Top {len(confused_class_idxs)} Confused Classes",
+        fontweight="bold",
+    )
+    ax6.set_xticklabels(ax6.get_xticklabels(), rotation=45, ha="right", fontsize=8)
+    ax6.set_yticklabels(ax6.get_yticklabels(), rotation=0, fontsize=8)
+
+    fig.suptitle("Model Evaluation", fontsize=14, fontweight="bold", y=1.01)
+    plt.tight_layout()
+    plt.show()
+
+    if top_pairs:
+        print("\nMost Confused Pairs (True -> Predicted)")
+        for true_i, pred_i, count in top_pairs:
+            true_id = class_ids[true_i]
+            pred_id = class_ids[pred_i]
+            true_name = (
+                id_to_name.get(true_id, f"ID_{true_id}")
+                if id_to_name
+                else f"ID_{true_id}"
+            )
+            pred_name = (
+                id_to_name.get(pred_id, f"ID_{pred_id}")
+                if id_to_name
+                else f"ID_{pred_id}"
+            )
+            print(f"  {true_name} -> {pred_name}: {count} misclassifications")
+
+    if (
+        ds is not None
+        and sample_indices is not None
+        and len(sample_indices) == len(y_true)
+        and top_pairs
+    ):
+        _plot_confused_pair_examples(
+            ds=ds,
+            sample_indices=sample_indices,
+            y_true=y_true,
+            y_pred=y_pred,
+            class_ids=class_ids,
+            pairs=top_pairs,
+            images_per_pair=images_per_pair,
+            id_to_name=id_to_name,
+            train_label_index=train_label_index,
+        )
+
+
+def _plot_confused_pair_examples(
+    *,
+    ds: Optional[DeepLakeDataset],
+    sample_indices: List[int],
+    y_true: List[int],
+    y_pred: List[int],
+    class_ids: List[int],
+    pairs: List[Tuple[int, int, int]],
+    images_per_pair: int = 3,
+    id_to_name: Dict[int, str] | None = None,
+    train_label_index: Dict[int, np.ndarray] | None = None,
+    figsize: Tuple[int, int] | None = None,
+) -> None:
+    """
+    Plot examples of confused pairs with optional reference images of the predicted class.
+
+    Each row shows:
+    - Misclassified examples (actual class, predicted as wrong class)
+    - A reference image of the predicted (wrong) class for comparison
+
+    Args:
+        ds: DeepLake dataset
+        sample_indices: Indices into ds for each prediction
+        y_true: True labels (class indices, not IDs)
+        y_pred: Predicted labels (class indices, not IDs)
+        class_ids: Maps class index to class ID
+        pairs: List of (true_idx, pred_idx, count) tuples
+        images_per_pair: Number of misclassified examples per pair
+        id_to_name: Optional mapping from class_id to species name
+        train_label_index: Optional label index to find reference images of predicted class
+        figsize: Optional figure size
+    """
+    images_per_pair = max(1, int(images_per_pair))
+    n_pairs = len(pairs)
+    if n_pairs <= 0:
+        return
+
+    # Add 1 column for reference image if train_label_index is available
+    show_reference = train_label_index is not None
+    n_cols = images_per_pair + (1 if show_reference else 0)
+
+    if figsize is None:
+        figsize = (n_cols * 3.2, max(3.0, n_pairs * 2.8))
+
+    fig, axes = plt.subplots(n_pairs, n_cols, figsize=figsize)
+    if n_pairs == 1:
+        axes = np.array([axes])
+    if n_cols == 1:
+        axes = axes.reshape(-1, 1)
+
+    for row, (true_i, pred_i, count) in enumerate(pairs):
+        matches = [
+            k
+            for k, (yt, yp) in enumerate(zip(y_true, y_pred))
+            if yt == true_i and yp == pred_i
+        ]
+        chosen = matches[:images_per_pair]
+        while len(chosen) < images_per_pair:
+            chosen.append(None)
+
+        true_id = class_ids[true_i]
+        pred_id = class_ids[pred_i]
+
+        # Get species names
+        true_name = (
+            id_to_name.get(true_id, f"ID_{true_id}") if id_to_name else f"ID_{true_id}"
+        )
+        pred_name = (
+            id_to_name.get(pred_id, f"ID_{pred_id}") if id_to_name else f"ID_{pred_id}"
+        )
+
+        true_name_short = true_name[:25] + "..." if len(true_name) > 28 else true_name
+        pred_name_short = pred_name[:25] + "..." if len(pred_name) > 28 else pred_name
+
+        # Plot misclassified examples
+        for col, k in enumerate(chosen):
+            ax = axes[row, col]
+            ax.axis("off")
+            if k is None:
+                continue
+            ds_idx = int(sample_indices[k])
+            try:
+                sample = ds[ds_idx]
+                img = _ensure_uint8_rgb(sample["images"].numpy())
+            except Exception:
+                continue
+            ax.imshow(img)
+            if col == 0:
+                ax.set_title(
+                    f"Actual: {true_name_short}\n→ Pred: {pred_name_short} (n={count})",
+                    fontsize=8,
+                    color="red",
+                )
+            else:
+                ax.set_title("Misclassified", fontsize=8, color="red")
+
+        # Plot reference image of predicted class (last column)
+        if show_reference:
+            ref_ax = axes[row, -1]
+            ref_ax.axis("off")
+
+            # Find a reference image of the predicted class
+            if pred_id in train_label_index and len(train_label_index[pred_id]) > 0:
+                ref_idx = int(train_label_index[pred_id][0])
+                try:
+                    ref_sample = ds[ref_idx]
+                    ref_img = _ensure_uint8_rgb(ref_sample["images"].numpy())
+                    ref_ax.imshow(ref_img)
+                    ref_ax.set_title(
+                        f"Reference:\n{pred_name_short}", fontsize=8, color="green"
+                    )
+                    # Add a green border to distinguish reference
+                    for spine in ref_ax.spines.values():
+                        spine.set_visible(True)
+                        spine.set_color("green")
+                        spine.set_linewidth(3)
+                except Exception:
+                    ref_ax.text(
+                        0.5, 0.5, "Reference\nN/A", ha="center", va="center", fontsize=9
+                    )
+
+    fig.suptitle(
+        "Confused Pair Examples (with Reference Images)", fontsize=12, fontweight="bold"
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+# =============================================================================
+# VISUALIZE PREPROCESSING (VERIFY BEFORE TRAINING)
+# =============================================================================
+
+
+def visualize_preprocessing_comparison(
+    ds: DeepLakeDataset,
+    indices: List[int],
+    bbox_padding_ratio: float = 0.15,
+    figsize: Tuple[int, int] = (16, 12),
+) -> None:
+    """Visualize the two preprocessing modes side-by-side.
+
+    Shows for each sample:
+    1. Original image
+    2. Native preprocessing (pad-to-square → EfficientNet transforms)
+    3. Bbox crop preprocessing (crop → pad-to-square → EfficientNet transforms)
+    4. Original with bounding box overlay
+
+    Run this BEFORE training to verify preprocessing looks correct!
+
+    Args:
+        ds: DeepLake dataset containing images and bounding boxes.
+        indices: List of dataset indices to visualize.
+        bbox_padding_ratio: Padding around bbox as fraction of bbox size.
+        figsize: Figure size (width, height).
+    """
+    weights = models.EfficientNet_B4_Weights.IMAGENET1K_V1
+    preprocess = weights.transforms()
+
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(-1, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(-1, 1, 1)
+
+    def tensor_to_display(t: torch.Tensor) -> np.ndarray:
+        """Convert normalized tensor back to displayable image."""
+        t_cpu = t.detach().cpu().float()
+        t_cpu = t_cpu * std + mean
+        t_cpu = t_cpu.clamp(0, 1)
+        return t_cpu.permute(1, 2, 0).numpy()
+
+    n_samples = len(indices)
+    fig, axes = plt.subplots(n_samples, 4, figsize=figsize)
+    if n_samples == 1:
+        axes = axes.reshape(1, -1)
+
+    col_titles = [
+        "Original",
+        "Native (pad→resize→crop→norm)",
+        "Bbox crop (crop→pad→resize→norm)",
+        "Bounding Box Overlay",
+    ]
+
+    for row, idx in enumerate(indices):
+        sample = ds[idx]
+        img = _ensure_uint8_rgb(sample["images"].numpy())
+        h, w = img.shape[:2]
+        box = sample["boxes"].numpy()
+        bbox = resolve_bbox_from_box_array(box, h, w)
+        class_id = int(sample["labels"].numpy().item())
+
+        # Column 0: Original
+        axes[row, 0].imshow(img)
+        axes[row, 0].set_title(f"Original ({w}×{h})", fontsize=9)
+        axes[row, 0].axis("off")
+
+        # Column 1: Native preprocessing
+        img_padded = _pad_to_square(img)
+        tensor_native = preprocess(Image.fromarray(img_padded))
+        native_display = tensor_to_display(tensor_native)
+        axes[row, 1].imshow(native_display)
+        axes[row, 1].set_title(f"Native (380×380)", fontsize=9)
+        axes[row, 1].axis("off")
+
+        # Column 2: Bbox crop preprocessing (OPTIMIZED: use pre-loaded box)
+        img_bbox = apply_bbox_crop_optimized(img, box, padding_ratio=bbox_padding_ratio)
+        img_bbox = _ensure_uint8_rgb(img_bbox)
+        img_bbox_padded = _pad_to_square(img_bbox)
+        tensor_bbox = preprocess(Image.fromarray(img_bbox_padded))
+        bbox_display = tensor_to_display(tensor_bbox)
+        axes[row, 2].imshow(bbox_display)
+        crop_h, crop_w = img_bbox.shape[:2]
+        axes[row, 2].set_title(f"Bbox crop ({crop_w}×{crop_h}→380×380)", fontsize=9)
+        axes[row, 2].axis("off")
+
+        # Column 3: Original with bbox overlay
+        axes[row, 3].imshow(img)
+        if bbox is not None:
+            x1, y1, x2, y2 = map(float, bbox)
+            box_w, box_h = x2 - x1, y2 - y1
+            coverage = box_w * box_h / (h * w) * 100
+            rect = plt.Rectangle(
+                (x1, y1), box_w, box_h, fill=False, edgecolor="lime", linewidth=2
+            )
+            axes[row, 3].add_patch(rect)
+            pad_x = int(box_w * bbox_padding_ratio)
+            pad_y = int(box_h * bbox_padding_ratio)
+            padded_rect = plt.Rectangle(
+                (max(0, x1 - pad_x), max(0, y1 - pad_y)),
+                min(w, x2 + pad_x) - max(0, x1 - pad_x),
+                min(h, y2 + pad_y) - max(0, y1 - pad_y),
+                fill=False,
+                edgecolor="yellow",
+                linewidth=1,
+                linestyle="--",
+            )
+            axes[row, 3].add_patch(padded_rect)
+            axes[row, 3].set_title(f"Bbox: {coverage:.1f}% of image", fontsize=9)
+        else:
+            axes[row, 3].set_title("No bbox available", fontsize=9)
+        axes[row, 3].axis("off")
+        axes[row, 0].set_ylabel(
+            f"Class {class_id}\nIdx {idx}",
+            fontsize=9,
+            rotation=0,
+            ha="right",
+            va="center",
+            labelpad=40,
+        )
+
+    for ax, title in zip(axes[0], col_titles):
+        ax.set_title(title, fontsize=11, fontweight="bold")
+
+    plt.suptitle(
+        "Preprocessing Comparison: Native vs Bbox Crop\n"
+        "(Green = bbox, Yellow dashed = crop region with padding)",
+        fontsize=12,
+        y=1.02,
+    )
+    plt.tight_layout()
+    plt.show()
+
+
+# =============================================================================
+# TRAINING CONFIGURATION
+# =============================================================================
+
+
+@dataclass
+class TrainConfig:
+    """
+    All hyperparameters for a training experiment.
+
+    Attributes:
+        run_name: Unique name for this experiment (used for saving)
+        preprocess_mode: 'native' or 'bbox_crop'
+        augmentation: Name from AUGMENTATION_REGISTRY, 'none', or 'recipe'
+        augmentation_params: Parameters for 'recipe' augmentation
+        bbox_padding_ratio: Padding around bbox as fraction of bbox size
+        pad_to_square: Whether to pad images to square before model transforms
+
+        batch_size: Training batch size
+        head_epochs: Number of epochs to train head only (Stage 1)
+        finetune_epochs: Number of epochs to fine-tune all layers (Stage 2)
+
+        lr_head: Learning rate for head during Stage 1
+        lr_backbone: Learning rate for backbone during Stage 2
+        lr_head_finetune: Learning rate for head during Stage 2
+        weight_decay: AdamW weight decay
+        label_smoothing: Label smoothing for CrossEntropyLoss
+
+        use_weighted_sampler: Whether to use weighted sampling for class imbalance
+        use_amp: Whether to use automatic mixed precision (faster on GPU)
+        use_torch_compile: Whether to use torch.compile for speedup (PyTorch 2.0+)
+        grad_clip_norm: Gradient clipping max norm
+
+        freeze_bn_head: Keep BatchNorm in eval mode during Stage 1
+        freeze_bn_finetune: Keep BatchNorm in eval mode during Stage 2
+
+        resume_head_ckpt: Optional path to a previously saved best head checkpoint (.pt).
+          If set, Stage 1 is skipped and training starts from that checkpoint.
+
+        early_stop_patience: Stop if val F1 doesn't improve for N epochs (0 = disabled)
+
+        seed: Random seed
+    """
+
+    run_name: str = "effnetb4_baseline_v1"
+    preprocess_mode: str = "native"
+    augmentation: str = "none"
+    augmentation_params: Dict[str, Any] | None = None
+    bbox_padding_ratio: float = 0.15
+    pad_to_square: bool = True
+    cache_dir: str | None = None
+    cache_version: str = "v1_uint8_rgb_pad_bbox"
+    batch_size: int = 16
+    head_epochs: int = 3
+    finetune_epochs: int = 10
+    lr_head: float = 3e-3
+    lr_backbone: float = 3e-5
+    lr_head_finetune: float = 3e-4
+    weight_decay: float = 1e-4
+    label_smoothing: float = 0.0
+    optimizer: str = "adamw"
+    momentum: float = 0.9
+    loss_fn: str = "cross_entropy"
+    focal_gamma: float = 2.0
+    scheduler: str = "none"
+    dropout: float = 0.4
+    use_weighted_sampler: bool = True
+    use_amp: bool = True
+    use_torch_compile: bool = True
+    grad_clip_norm: float = 1.0
+    freeze_bn_head: bool = True
+    freeze_bn_finetune: bool = True
+    resume_head_ckpt: str | None = None
+    early_stop_patience: int = 3
+    seed: int = 42
+
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if self.preprocess_mode not in {"native", "bbox_crop"}:
+            raise ValueError(
+                f"preprocess_mode must be 'native' or 'bbox_crop', got '{self.preprocess_mode}'"
+            )
+        if self.optimizer not in {"adamw", "sgd"}:
+            raise ValueError(
+                f"optimizer must be 'adamw' or 'sgd', got '{self.optimizer}'"
+            )
+        if self.loss_fn not in {"cross_entropy", "focal", "label_smoothing"}:
+            raise ValueError(
+                f"loss_fn must be 'cross_entropy', 'focal', or 'label_smoothing', got '{self.loss_fn}'"
+            )
+        if self.scheduler not in {"none", "cosine", "onecycle"}:
+            raise ValueError(
+                f"scheduler must be 'none', 'cosine', or 'onecycle', got '{self.scheduler}'"
+            )
+        if not 0.0 <= self.dropout <= 1.0:
+            raise ValueError(f"dropout must be between 0.0 and 1.0, got {self.dropout}")
+        if self.augmentation == "recipe":
+            if (
+                not isinstance(self.augmentation_params, dict)
+                or not self.augmentation_params
+            ):
+                raise ValueError(
+                    "augmentation_params must be a non-empty dict when augmentation='recipe'"
+                )
+            return
+        if (
+            self.augmentation not in AUGMENTATION_REGISTRY
+            and self.augmentation != "none"
+        ):
+            raise ValueError(
+                f"augmentation must be one of {list(AUGMENTATION_REGISTRY.keys())}, 'recipe', or 'none'"
+            )
+
+
+# =============================================================================
+# TWO-STAGE TRAINING FUNCTION
+# =============================================================================
+
+
+def train_two_stage(
+    cfg: TrainConfig,
+    ds_train: DeepLakeDataset,
+    train_label_index: Dict[int, np.ndarray],
+    ds_holdout: Optional[DeepLakeDataset] = None,
+    holdout_label_index: Optional[Dict[int, np.ndarray]] = None,
+    *,
+    splits: Optional[SplitIndices] = None,
+    evaluate_test: bool = True,
+    evaluate_holdout: bool = False,
+    on_epoch_end: Callable[[str, Dict[str, float], int], None] | None = None,
+    device: torch.device = DEVICE,
+    output_dir: Path = RUNS_DIR,
+) -> Tuple[nn.Module, pd.DataFrame, Dict[str, Any], Path]:
+    """Train EfficientNet-B4 in two stages: head-only, then fine-tune.
+
+    Stage 1 freezes the backbone and trains only the classification head.
+    Stage 2 unfreezes all layers for end-to-end fine-tuning.
+
+    Args:
+        cfg: Training configuration dataclass.
+        ds_train: DeepLake dataset for training (will be split internally).
+        train_label_index: Label index mapping class_id to dataset indices.
+        ds_holdout: Optional holdout dataset for final evaluation.
+        holdout_label_index: Label index for holdout dataset.
+        splits: Optional precomputed SplitIndices. If None, splits are computed.
+        evaluate_test: Whether to evaluate on internal test split. Defaults to True.
+        evaluate_holdout: Whether to evaluate on holdout set. Defaults to False.
+        on_epoch_end: Optional callback(stage, metrics, epoch) after each epoch.
+        device: Device for training. Defaults to best available.
+        output_dir: Directory for checkpoints and logs. Defaults to RUNS_DIR.
+
+    Returns:
+        Tuple of (model, history_df, summary_dict, run_dir_path).
+
+    Raises:
+        FileNotFoundError: If resume_head_ckpt is specified but doesn't exist.
+        ValueError: If evaluate_holdout=True but ds_holdout is None.
+    """
+    seed_everything(cfg.seed)
+
+    # Setup output directory
+    run_dir = output_dir / cfg.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save configuration
+    (run_dir / "config.json").write_text(json.dumps(asdict(cfg), indent=2))
+
+    # Class mapping
+    class_ids = sorted(train_label_index.keys())
+    class_id_to_idx = {cid: i for i, cid in enumerate(class_ids)}
+    num_classes = len(class_ids)
+
+    # Create / reuse data splits (keep experiments comparable)
+    if splits is None:
+        splits = split_label_index_stratified(
+            train_label_index,
+            class_id_to_idx=class_id_to_idx,
+            val_frac=0.15,
+            test_frac=0.15,
+            seed=cfg.seed,
+        )
+
+    print(
+        f"Splits: train={len(splits.train_idx)}, val={len(splits.val_idx)}, test={len(splits.test_idx)}"
+    )
+
+    # Build model
+    model, weights = build_efficientnet_b4(num_classes, dropout=cfg.dropout)
+    model = model.to(device)
+
+    if cfg.use_torch_compile:
+        model = maybe_compile_model(model, enable=True)
+
+    resumed_from_head = False
+    if cfg.resume_head_ckpt:
+        resume_path = Path(cfg.resume_head_ckpt)
+        if not resume_path.exists():
+            raise FileNotFoundError(f"resume_head_ckpt not found: {resume_path}")
+        ckpt = torch.load(resume_path, map_location=device)
+        if not isinstance(ckpt, dict) or "model_state" not in ckpt:
+            raise ValueError(
+                f"Invalid head checkpoint (missing 'model_state'): {resume_path}"
+            )
+        model.load_state_dict(ckpt["model_state"])
+        resumed_from_head = True
+
+    # Get augmentation
+    train_aug = resolve_train_augmentation(cfg.augmentation, cfg.augmentation_params)
+
+    cache_dir = Path(cfg.cache_dir) if cfg.cache_dir else None
+
+    # Create datasets
+    train_ds = BirdDataset(
+        ds_train,
+        splits.train_idx,
+        splits.train_y,
+        weights=weights,
+        preprocess_mode=cfg.preprocess_mode,
+        bbox_padding_ratio=cfg.bbox_padding_ratio,
+        pad_to_square=cfg.pad_to_square,
+        augmentation=train_aug,
+        cache_dir=cache_dir,
+        cache_version=cfg.cache_version,
+    )
+    val_ds = BirdDataset(
+        ds_train,
+        splits.val_idx,
+        splits.val_y,
+        weights=weights,
+        preprocess_mode=cfg.preprocess_mode,
+        bbox_padding_ratio=cfg.bbox_padding_ratio,
+        pad_to_square=cfg.pad_to_square,
+        augmentation=None,
+        cache_dir=cache_dir,
+        cache_version=cfg.cache_version,
+    )
+    test_ds = BirdDataset(
+        ds_train,
+        splits.test_idx,
+        splits.test_y,
+        weights=weights,
+        preprocess_mode=cfg.preprocess_mode,
+        bbox_padding_ratio=cfg.bbox_padding_ratio,
+        pad_to_square=cfg.pad_to_square,
+        augmentation=None,
+        return_index=True,
+        cache_dir=cache_dir,
+        cache_version=cfg.cache_version,
+    )
+
+    num_workers = 4 if cache_dir is not None else 0
+    sampler = (
+        make_weighted_sampler(splits.train_y) if cfg.use_weighted_sampler else None
+    )
+    train_loader = make_dataloader(
+        train_ds, cfg.batch_size, shuffle=True, sampler=sampler, num_workers=num_workers
+    )
+    val_loader = make_dataloader(
+        val_ds, cfg.batch_size, shuffle=False, num_workers=num_workers
+    )
+    test_loader = make_dataloader(
+        test_ds, cfg.batch_size, shuffle=False, num_workers=num_workers
+    )
+
+    holdout_loader = None
+    if evaluate_holdout:
+        if ds_holdout is None or holdout_label_index is None:
+            raise ValueError(
+                "evaluate_holdout=True requires ds_holdout and holdout_label_index"
+            )
+        holdout_indices, holdout_labels = [], []
+        for class_id, idxs in holdout_label_index.items():
+            if class_id not in class_id_to_idx:
+                continue
+            holdout_indices.extend(idxs.tolist())
+            holdout_labels.extend([class_id_to_idx[class_id]] * len(idxs))
+        holdout_ds = BirdDataset(
+            ds_holdout,
+            np.array(holdout_indices),
+            np.array(holdout_labels),
+            weights=weights,
+            preprocess_mode=cfg.preprocess_mode,
+            bbox_padding_ratio=cfg.bbox_padding_ratio,
+            pad_to_square=cfg.pad_to_square,
+            augmentation=None,
+            return_index=True,
+            cache_dir=cache_dir,
+            cache_version=cfg.cache_version,
+        )
+        holdout_loader = make_dataloader(
+            holdout_ds, cfg.batch_size, shuffle=False, num_workers=num_workers
+        )
+
+    if cfg.loss_fn == "focal":
+        criterion = FocalLoss(gamma=cfg.focal_gamma)
+    elif cfg.loss_fn == "label_smoothing":
+        criterion = nn.CrossEntropyLoss(label_smoothing=cfg.label_smoothing)
+    else:
+        criterion = nn.CrossEntropyLoss()
+
+    history = []
+
+    def create_optimizer(
+        params: List[torch.nn.Parameter], lr: float
+    ) -> torch.optim.Optimizer:
+        """Create optimizer based on config.
+
+        Args:
+            params: Model parameters to optimize.
+            lr: Learning rate.
+
+        Returns:
+            Configured optimizer (AdamW or SGD).
+        """
+        if cfg.optimizer == "sgd":
+            return torch.optim.SGD(
+                params,
+                lr=lr,
+                momentum=cfg.momentum,
+                weight_decay=cfg.weight_decay,
+            )
+        else:
+            return torch.optim.AdamW(
+                params,
+                lr=lr,
+                weight_decay=cfg.weight_decay,
+            )
+
+    def create_scheduler(
+        optimizer: torch.optim.Optimizer, epochs: int, steps_per_epoch: int
+    ) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
+        """Create learning rate scheduler based on config.
+
+        Args:
+            optimizer: Optimizer to schedule.
+            epochs: Number of epochs for this stage.
+            steps_per_epoch: Number of batches per epoch.
+
+        Returns:
+            Scheduler instance or None if scheduler='none'.
+        """
+        if cfg.scheduler == "cosine":
+            return CosineAnnealingLR(optimizer, T_max=epochs)
+        elif cfg.scheduler == "onecycle":
+            return OneCycleLR(
+                optimizer,
+                max_lr=[pg["lr"] for pg in optimizer.param_groups],
+                total_steps=epochs * steps_per_epoch + 1,
+                pct_start=0.1,
+            )
+        else:
+            return None
+
+    def run_stage(
+        stage_name: str,
+        epochs: int,
+        optimizer: torch.optim.Optimizer,
+        freeze_bn: bool,
+        epoch_offset: int = 0,
+        scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None,
+    ) -> Path:
+        """Run one training stage and return path to best checkpoint.
+
+        Args:
+            stage_name: Name of the stage ('head' or 'finetune').
+            epochs: Number of epochs to train.
+            optimizer: Optimizer for this stage.
+            freeze_bn: Whether to keep BatchNorm in eval mode.
+            epoch_offset: Global epoch offset for logging.
+            scheduler: Learning rate scheduler (optional).
+
+        Returns:
+            Path to the best checkpoint file for this stage.
+        """
+        best_f1 = -1.0
+        best_path = run_dir / f"best_{stage_name}.pt"
+        no_improve = 0
+
+        # Epoch-level progress bar with time estimates
+        epoch_pbar = tqdm(
+            range(1, epochs + 1), desc=f"Stage: {stage_name}", unit="epoch"
+        )
+
+        for ep in epoch_pbar:
+            t0 = time.time()
+            step_per_batch = scheduler is not None and cfg.scheduler == "onecycle"
+
+            # Train
+            train_metrics = train_one_epoch(
+                model,
+                train_loader,
+                device,
+                criterion,
+                optimizer,
+                use_amp=cfg.use_amp,
+                grad_clip_norm=cfg.grad_clip_norm,
+                freeze_bn=freeze_bn,
+                scheduler=scheduler if step_per_batch else None,
+                scheduler_step_per_batch=step_per_batch,
+            )
+
+            # Step scheduler per-epoch (CosineAnnealingLR, etc.)
+            if scheduler is not None and not step_per_batch:
+                scheduler.step()
+
+            # Validate
+            val_metrics = evaluate(model, val_loader, device, criterion)
+
+            # Log
+            elapsed = time.time() - t0
+            row = {
+                "stage": stage_name,
+                "epoch": ep,
+                "global_epoch": epoch_offset + ep,
+                "train_loss": train_metrics["loss"],
+                "train_acc": train_metrics["acc"],
+                "train_precision": train_metrics["precision"],
+                "train_recall": train_metrics["recall"],
+                "train_f1": train_metrics["f1"],
+                "val_loss": val_metrics["loss"],
+                "val_acc": val_metrics["acc"],
+                "val_precision": val_metrics["precision"],
+                "val_recall": val_metrics["recall"],
+                "val_f1": val_metrics["f1"],
+                "seconds": elapsed,
+            }
+            history.append(row)
+
+            # Update progress bar with metrics
+            epoch_pbar.set_postfix(
+                {
+                    "val_f1": f"{val_metrics['f1']:.3f}",
+                    "val_loss": f"{val_metrics['loss']:.3f}",
+                    "best_f1": f"{max(best_f1, val_metrics['f1']):.3f}",
+                }
+            )
+
+            if on_epoch_end is not None:
+                on_epoch_end(stage_name, val_metrics, epoch_offset + ep)
+
+            # Checkpoint
+            if val_metrics["f1"] > best_f1:
+                best_f1 = val_metrics["f1"]
+                no_improve = 0
+                torch.save(
+                    {
+                        "model_state": model.state_dict(),
+                        "class_ids": class_ids,
+                        "class_id_to_idx": class_id_to_idx,
+                        "epoch": epoch_offset + ep,
+                        "val_f1": best_f1,
+                        "config": asdict(cfg),
+                    },
+                    best_path,
+                )
+            else:
+                no_improve += 1
+
+            # Early stopping
+            if cfg.early_stop_patience > 0 and no_improve >= cfg.early_stop_patience:
+                print(
+                    f"  Early stopping triggered (no improvement for {cfg.early_stop_patience} epochs)"
+                )
+                break
+
+        return best_path
+
+    best_head_path: Path | None = None
+    finetune_epoch_offset = 0
+    steps_per_epoch = len(train_loader)
+
+    if resumed_from_head:
+        print(f"\n{'='*60}")
+        print("STAGE 1: Skipped (Resuming from best head checkpoint)")
+        print(f"{'='*60}")
+        print(f"Resume: {cfg.resume_head_ckpt}")
+        best_head_path = Path(cfg.resume_head_ckpt)
+        finetune_epoch_offset = 0
+    elif cfg.head_epochs > 0:
+        print(f"\n{'='*60}")
+        print("STAGE 1: Training Classification Head (Backbone Frozen)")
+        print(f"{'='*60}")
+        print(
+            f"  Optimizer: {cfg.optimizer.upper()}, Loss: {cfg.loss_fn}, Scheduler: {cfg.scheduler}"
+        )
+
+        freeze_backbone(model)
+        head_trainable_params = [p for p in model.parameters() if p.requires_grad]
+
+        if cfg.optimizer == "sgd":
+            optimizer_head = torch.optim.SGD(
+                head_trainable_params,
+                lr=cfg.lr_head,
+                momentum=cfg.momentum,
+                weight_decay=cfg.weight_decay,
+            )
+        else:
+            optimizer_head = torch.optim.AdamW(
+                head_trainable_params,
+                lr=cfg.lr_head,
+                weight_decay=cfg.weight_decay,
+            )
+
+        scheduler_head = create_scheduler(
+            optimizer_head, cfg.head_epochs, steps_per_epoch
+        )
+
+        best_head_path = run_stage(
+            "head",
+            cfg.head_epochs,
+            optimizer_head,
+            freeze_bn=cfg.freeze_bn_head,
+            epoch_offset=0,
+            scheduler=scheduler_head,
+        )
+
+        model.load_state_dict(
+            torch.load(best_head_path, map_location=device)["model_state"]
+        )
+        finetune_epoch_offset = cfg.head_epochs
+    else:
+        print(f"\n{'='*60}")
+        print("STAGE 1: Skipped (head_epochs=0)")
+        print(f"{'='*60}")
+        finetune_epoch_offset = 0
+
+    if cfg.finetune_epochs > 0:
+        print(f"\n{'='*60}")
+        print("STAGE 2: Fine-tuning All Layers")
+        print(f"{'='*60}")
+        print(
+            f"  Optimizer: {cfg.optimizer.upper()}, Loss: {cfg.loss_fn}, Scheduler: {cfg.scheduler}"
+        )
+
+        unfreeze_all(model)
+
+        # Different learning rates for backbone vs head
+        head_params = list(model.classifier.parameters())
+        head_param_ids = {id(p) for p in head_params}
+        backbone_params = [p for p in model.parameters() if id(p) not in head_param_ids]
+
+        if cfg.optimizer == "sgd":
+            optimizer_finetune = torch.optim.SGD(
+                [
+                    {"params": backbone_params, "lr": cfg.lr_backbone},
+                    {"params": head_params, "lr": cfg.lr_head_finetune},
+                ],
+                momentum=cfg.momentum,
+                weight_decay=cfg.weight_decay,
+            )
+        else:
+            optimizer_finetune = torch.optim.AdamW(
+                [
+                    {"params": backbone_params, "lr": cfg.lr_backbone},
+                    {"params": head_params, "lr": cfg.lr_head_finetune},
+                ],
+                weight_decay=cfg.weight_decay,
+            )
+
+        scheduler_finetune = create_scheduler(
+            optimizer_finetune, cfg.finetune_epochs, steps_per_epoch
+        )
+
+        best_finetune_path = run_stage(
+            "finetune",
+            cfg.finetune_epochs,
+            optimizer_finetune,
+            freeze_bn=cfg.freeze_bn_finetune,
+            epoch_offset=finetune_epoch_offset,
+            scheduler=scheduler_finetune,
+        )
+
+        model.load_state_dict(
+            torch.load(best_finetune_path, map_location=device)["model_state"]
+        )
+    else:
+        print(f"\n{'='*60}")
+        print("STAGE 2: Skipped (finetune_epochs=0)")
+        print(f"{'='*60}")
+
+    print(f"\n{'='*60}")
+    print("FINAL EVALUATION")
+    print(f"{'='*60}")
+
+    test_metrics = None
+    test_y_true, test_y_pred = None, None
+    test_indices = None
+    holdout_indices = None
+    if evaluate_test:
+        test_metrics, test_y_true, test_y_pred, test_indices = evaluate_with_preds(
+            model, test_loader, device, criterion
+        )
+        (run_dir / "test_classification_report.txt").write_text(
+            classification_report(
+                test_y_true,
+                test_y_pred,
+                labels=list(range(num_classes)),
+                target_names=[str(cid) for cid in class_ids],
+                digits=3,
+                zero_division=0,
+            )
+        )
+        rep = classification_report(
+            test_y_true,
+            test_y_pred,
+            labels=list(range(num_classes)),
+            output_dict=True,
+            zero_division=0,
+        )
+        test_metrics["weighted_precision"] = float(rep["weighted avg"]["precision"])
+        test_metrics["weighted_recall"] = float(rep["weighted avg"]["recall"])
+        test_metrics["weighted_f1"] = float(rep["weighted avg"]["f1-score"])
+        print("\n" + "=" * 70)
+        print("TEST SET (15% from train split)")
+        print("=" * 70)
+        print(f"  Accuracy:         {test_metrics['acc']:.4f}")
+        print(f"  Top-5 Accuracy:   {test_metrics['top5_acc']:.4f}")
+        print(f"  Macro Precision:  {test_metrics['precision']:.4f}")
+        print(f"  Macro Recall:     {test_metrics['recall']:.4f}")
+        print(f"  Macro F1:         {test_metrics['f1']:.4f}")
+        print(f"  Weighted F1:      {test_metrics['weighted_f1']:.4f}")
+
+    holdout_metrics = None
+    holdout_y_true, holdout_y_pred = None, None
+    if evaluate_holdout:
+        holdout_metrics, holdout_y_true, holdout_y_pred, holdout_indices = (
+            evaluate_with_preds(model, holdout_loader, device, criterion)
+        )
+        (run_dir / "holdout_classification_report.txt").write_text(
+            classification_report(
+                holdout_y_true,
+                holdout_y_pred,
+                labels=list(range(num_classes)),
+                target_names=[str(cid) for cid in class_ids],
+                digits=3,
+                zero_division=0,
+            )
+        )
+        rep = classification_report(
+            holdout_y_true,
+            holdout_y_pred,
+            labels=list(range(num_classes)),
+            output_dict=True,
+            zero_division=0,
+        )
+        holdout_metrics["weighted_precision"] = float(rep["weighted avg"]["precision"])
+        holdout_metrics["weighted_recall"] = float(rep["weighted avg"]["recall"])
+        holdout_metrics["weighted_f1"] = float(rep["weighted avg"]["f1-score"])
+        print("\n" + "=" * 70)
+        print("HOLDOUT SET (NABirds validation split)")
+        print("=" * 70)
+        print(f"  Accuracy:         {holdout_metrics['acc']:.4f}")
+        print(f"  Top-5 Accuracy:   {holdout_metrics['top5_acc']:.4f}")
+        print(f"  Macro Precision:  {holdout_metrics['precision']:.4f}")
+        print(f"  Macro Recall:     {holdout_metrics['recall']:.4f}")
+        print(f"  Macro F1:         {holdout_metrics['f1']:.4f}")
+        print(f"  Weighted F1:      {holdout_metrics['weighted_f1']:.4f}")
+
+    history_df = pd.DataFrame(history)
+    history_df.to_csv(run_dir / "history.csv", index=False)
+
+    summary = {
+        "test": test_metrics,
+        "holdout": holdout_metrics,
+        "val_best_f1": float(history_df["val_f1"].max()),
+        "class_ids": class_ids,
+        "test_y_true": test_y_true,
+        "test_y_pred": test_y_pred,
+        "test_indices": test_indices if evaluate_test else None,
+        "holdout_y_true": holdout_y_true,
+        "holdout_y_pred": holdout_y_pred,
+        "holdout_indices": holdout_indices if evaluate_holdout else None,
+    }
+    (run_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "test": test_metrics,
+                "holdout": holdout_metrics,
+                "val_best_f1": float(history_df["val_f1"].max()),
+            },
+            indent=2,
+        )
+    )
+
+    print(f"\nResults saved to: {run_dir}")
+
+    return model, history_df, summary, run_dir
+
+
+def plot_training_history(history_df: pd.DataFrame, run_name: str = "") -> None:
+    """Plot comprehensive training curves from history DataFrame.
+
+    Shows 4 subplots:
+    1. Loss (train vs val)
+    2. Accuracy (train vs val)
+    3. F1 Score (train vs val)
+    4. All validation metrics combined
+
+    A vertical dashed line marks the transition from Stage 1 (head) to Stage 2 (finetune).
+
+    Args:
+        history_df: DataFrame with columns including 'global_epoch', 'stage',
+            'train_loss', 'val_loss', 'train_acc', 'val_acc', 'train_f1', 'val_f1'.
+        run_name: Optional experiment name to include in the plot title.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
+
+    epochs = history_df["global_epoch"]
+    head_epochs = history_df[history_df["stage"] == "head"]["global_epoch"].max()
+
+    train_color = "#2ecc71"
+    val_color = "#e74c3c"
+
+    ax = axes[0]
+    ax.plot(
+        epochs,
+        history_df["train_loss"],
+        label="Train Loss",
+        color=train_color,
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_loss"],
+        label="Val Loss",
+        color=val_color,
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
+    ax.set_xlabel("Epoch", fontsize=10)
+    ax.set_ylabel("Loss", fontsize=10)
+    ax.set_title("Loss", fontsize=12, fontweight="bold")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.text(
+        head_epochs / 2,
+        ax.get_ylim()[1] * 0.95,
+        "Head",
+        ha="center",
+        fontsize=9,
+        alpha=0.7,
+    )
+    ax.text(
+        head_epochs + (epochs.max() - head_epochs) / 2,
+        ax.get_ylim()[1] * 0.95,
+        "Finetune",
+        ha="center",
+        fontsize=9,
+        alpha=0.7,
+    )
+
+    ax = axes[1]
+    ax.plot(
+        epochs,
+        history_df["train_acc"],
+        label="Train Accuracy",
+        color=train_color,
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_acc"],
+        label="Val Accuracy",
+        color=val_color,
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
+    ax.set_xlabel("Epoch", fontsize=10)
+    ax.set_ylabel("Accuracy", fontsize=10)
+    ax.set_title("Accuracy", fontsize=12, fontweight="bold")
+    ax.legend(loc="lower right", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+
+    ax = axes[2]
+    ax.plot(
+        epochs,
+        history_df["train_f1"],
+        label="Train F1",
+        color=train_color,
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_f1"],
+        label="Val F1",
+        color=val_color,
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
+    ax.set_xlabel("Epoch", fontsize=10)
+    ax.set_ylabel("Macro F1 Score", fontsize=10)
+    ax.set_title("F1 Score (Macro)", fontsize=12, fontweight="bold")
+    ax.legend(loc="lower right", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+
+    ax = axes[3]
+    ax.plot(
+        epochs,
+        history_df["val_acc"],
+        label="Val Accuracy",
+        color="#3498db",
+        marker="o",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_f1"],
+        label="Val F1",
+        color="#e74c3c",
+        marker="s",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_precision"],
+        label="Val Precision",
+        color="#2ecc71",
+        marker="^",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.plot(
+        epochs,
+        history_df["val_recall"],
+        label="Val Recall",
+        color="#9b59b6",
+        marker="d",
+        markersize=5,
+        linewidth=2,
+    )
+    ax.axvline(
+        x=head_epochs + 0.5, color="gray", linestyle="--", alpha=0.7, linewidth=1.5
+    )
+    ax.set_xlabel("Epoch", fontsize=10)
+    ax.set_ylabel("Score", fontsize=10)
+    ax.set_title("Validation Metrics Overview", fontsize=12, fontweight="bold")
+    ax.legend(loc="lower right", fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+
+    best_epoch = history_df.loc[history_df["val_f1"].idxmax(), "global_epoch"]
+    best_f1 = history_df["val_f1"].max()
+
+    title = "Training History"
+    if run_name:
+        title += f" — {run_name}"
+    fig.suptitle(title, fontsize=14, fontweight="bold", y=1.02)
+
+    plt.tight_layout()
+    plt.show()
+    print("\nTraining Summary:")
+    print(f"   Best Val F1: {history_df['val_f1'].max():.4f} (epoch {int(best_epoch)})")
+    print(f"   Best Val Acc: {history_df['val_acc'].max():.4f}")
+    print(f"   Final Train Loss: {history_df['train_loss'].iloc[-1]:.4f}")
+    print(f"   Final Val Loss: {history_df['val_loss'].iloc[-1]:.4f}")
+
+
+# =============================================================================
+# EXPERIMENT RUNNER (simple, repeatable experiments)
+# =============================================================================
+
+
+def make_experiment_runner(
+    *,
+    ds_train: DeepLakeDataset,
+    train_label_index: Dict[int, np.ndarray],
+    splits: SplitIndices,
+    ds_holdout: Optional[DeepLakeDataset] = None,
+    holdout_label_index: Optional[Dict[int, np.ndarray]] = None,
+    output_dir: Optional[Path] = None,
+) -> SimpleNamespace:
+    """Create an experiment runner for launching training experiments.
+
+    Provides a simple interface for running multiple experiments with consistent
+    data splits for fair comparisons.
+
+    Rules enforced:
+    - Uses the SAME splits for every run (fair comparisons)
+    - Uses ONLY internal val/test from ds_train during experiments
+    - Holdout is only used via explicit final_holdout() call
+
+    Args:
+        ds_train: DeepLake training dataset.
+        train_label_index: Label index for training data.
+        splits: Precomputed train/val/test splits.
+        ds_holdout: Optional holdout dataset for final evaluation.
+        holdout_label_index: Label index for holdout dataset.
+        output_dir: Directory for results. Defaults to RUNS_DIR.
+
+    Returns:
+        SimpleNamespace with methods: run(), run_or_load(), run_many(),
+        df(), reset(), load_cached(), load_all_cached(), final_holdout().
+    """
+    runs_dir = output_dir if output_dir is not None else RUNS_DIR
+    runs_dir = Path(runs_dir)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+
+    results: List[Dict[str, Any]] = []
+
+    id_to_name: Dict[int, str] | None = None
+    try:
+        class_names = ds_train.labels.info.get("class_names", None)
+        if class_names is not None:
+            actual_labels_used = set(train_label_index.keys())
+            id_to_name = {
+                label_id: class_names[label_id]
+                for label_id in actual_labels_used
+                if label_id < len(class_names)
+            }
+            print(f"Loaded species names for {len(id_to_name)} classes")
+    except Exception as e:
+        print(f"Could not load species names: {e}")
+        id_to_name = None
+
+    def _cleanup(model: nn.Module) -> None:
+        """Clean up model and free GPU memory.
+
+        Args:
+            model: Model to delete.
+        """
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def run(
+        run_name: str,
+        *,
+        plot: bool = True,
+        evaluate_test: bool = True,
+        **cfg_overrides,
+    ):
+        cfg_kwargs = {**BASELINE_CONFIG, **cfg_overrides}
+        cfg = TrainConfig(run_name=run_name, **cfg_kwargs)
+
+        model, history_df, summary, run_dir = train_two_stage(
+            cfg=cfg,
+            ds_train=ds_train,
+            train_label_index=train_label_index,
+            splits=splits,
+            evaluate_test=evaluate_test,
+            evaluate_holdout=False,
+            output_dir=runs_dir,
+        )
+
+        if plot:
+            if evaluate_test and summary.get("test_y_true") is not None:
+                plot_evaluation_suite(
+                    history_df=history_df,
+                    y_true=summary["test_y_true"],
+                    y_pred=summary["test_y_pred"],
+                    class_ids=summary["class_ids"],
+                    run_name=cfg.run_name,
+                    ds=ds_train,
+                    sample_indices=summary.get("test_indices"),
+                    id_to_name=id_to_name,
+                    train_label_index=train_label_index,
+                )
+            else:
+                plot_training_history(history_df, run_name=cfg.run_name)
+
+        test = summary.get("test") or {}
+        row = {
+            "run_name": cfg.run_name,
+            "preprocess_mode": cfg.preprocess_mode,
+            "augmentation": cfg.augmentation,
+            "augmentation_params": cfg.augmentation_params,
+            "resume_head_ckpt": cfg.resume_head_ckpt,
+            "val_best_f1": summary.get("val_best_f1"),
+            "test_f1": test.get("f1"),
+            "test_precision": test.get("precision"),
+            "test_recall": test.get("recall"),
+            "test_acc": test.get("acc"),
+            "test_top5_acc": test.get("top5_acc"),
+            "test_weighted_f1": test.get("weighted_f1"),
+            "test_weighted_precision": test.get("weighted_precision"),
+            "test_weighted_recall": test.get("weighted_recall"),
+            "run_dir": str(run_dir),
+        }
+        results.append(row)
+
+        _cleanup(model)
+        return row, history_df, summary, run_dir
+
+    def run_many(
+        experiments: Dict[str, Dict[str, Any]],
+        *,
+        plot: bool = False,
+        evaluate_test: bool = True,
+        **common_overrides,
+    ) -> None:
+        """Run a batch of experiments.
+
+        Example:
+          runner.run_many({
+              "lr_1e-3": {"lr_head": 1e-3},
+              "lr_3e-3": {"lr_head": 3e-3},
+          }, preprocess_mode="bbox_crop")
+        """
+        for run_name, overrides in experiments.items():
+            merged = {**common_overrides, **(overrides or {})}
+            run(run_name, plot=plot, evaluate_test=evaluate_test, **merged)
+
+    def df(*, sort_by: str = "val_best_f1", ascending: bool = False) -> pd.DataFrame:
+        if not results:
+            return pd.DataFrame([])
+        return pd.DataFrame(results).sort_values(sort_by, ascending=ascending)
+
+    def reset() -> None:
+        results.clear()
+
+    def load_cached(run_name: str, plot: bool = False) -> Optional[Dict[str, Any]]:
+        """
+        Load a previously completed experiment from disk and add to results.
+
+        Returns the result dict if found, None otherwise.
+        Use this to restore experiments from previous sessions.
+        """
+        saved = load_experiment_results(run_name, runs_dir=runs_dir)
+        if saved is None:
+            return None
+
+        config = saved["config"]
+        summary = saved["summary"]
+        history_df = saved["history_df"]
+        test = summary.get("test") or {}
+
+        row = {
+            "run_name": run_name,
+            "preprocess_mode": config.get("preprocess_mode"),
+            "augmentation": config.get("augmentation"),
+            "augmentation_params": config.get("augmentation_params"),
+            "resume_head_ckpt": config.get("resume_head_ckpt"),
+            "val_best_f1": summary.get("val_best_f1"),
+            "test_f1": test.get("f1"),
+            "test_precision": test.get("precision"),
+            "test_recall": test.get("recall"),
+            "test_acc": test.get("acc"),
+            "test_top5_acc": test.get("top5_acc"),
+            "test_weighted_f1": test.get("weighted_f1"),
+            "test_weighted_precision": test.get("weighted_precision"),
+            "test_weighted_recall": test.get("weighted_recall"),
+            "run_dir": str(saved["run_dir"]),
+        }
+        results.append(row)
+
+        if plot:
+            plot_training_history(history_df, run_name=run_name)
+
+        print(
+            f"  Loaded cached experiment: {run_name} (val_f1={summary.get('val_best_f1', 0):.4f})"
+        )
+        return row
+
+    def run_or_load(
+        run_name: str,
+        *,
+        plot: bool = True,
+        evaluate_test: bool = True,
+        force_retrain: bool = False,
+        **cfg_overrides,
+    ):
+        """
+        Run experiment OR load from cache if already completed.
+
+        This is the recommended method for resumable experiments:
+        - Checks if experiment already exists on disk
+        - If exists: loads results and skips training
+        - If not exists: runs training normally
+
+        Args:
+            run_name: Experiment name
+            plot: Whether to show plots
+            evaluate_test: Whether to evaluate on test set
+            force_retrain: If True, always retrain even if cached
+            **cfg_overrides: Training config overrides
+
+        Returns:
+            Same as run(): (row, history_df, summary, run_dir)
+        """
+        if not force_retrain and check_experiment_exists(run_name, runs_dir=runs_dir):
+            row = load_cached(run_name, plot=plot)
+            if row is not None:
+                saved = load_experiment_results(run_name, runs_dir=runs_dir)
+                return row, saved["history_df"], saved["summary"], saved["run_dir"]
+
+        return run(run_name, plot=plot, evaluate_test=evaluate_test, **cfg_overrides)
+
+    def load_all_cached(run_names: List[str] = None, plot: bool = False) -> int:
+        """
+        Load multiple cached experiments at once.
+
+        Args:
+            run_names: List of experiment names to load. If None, loads all
+                       completed experiments found in runs_dir.
+            plot: Whether to show plots for each loaded experiment
+
+        Returns:
+            Number of experiments successfully loaded
+        """
+        if run_names is None:
+            run_names = get_completed_experiments(runs_dir=runs_dir)
+
+        loaded = 0
+        for name in run_names:
+            if load_cached(name, plot=plot) is not None:
+                loaded += 1
+
+        return loaded
+
+    def final_holdout(
+        run_name: str,
+        *,
+        plot: bool = True,
+        **cfg_overrides,
+    ):
+        """Run a single FINAL evaluation that includes the holdout (ds_val)."""
+        if ds_holdout is None:
+            raise ValueError("Pass ds_holdout into make_experiment_runner(...)")
+        holdout_index = holdout_label_index
+        val_clean_path = Path("label_index_val_clean.npz")
+        holdout_index_path = Path("label_index_holdout.npz")
+
+        if holdout_index is None:
+            if val_clean_path.exists():
+                holdout_index = load_label_index(val_clean_path)
+                print(f"Using cleaned holdout index from {val_clean_path}")
+            elif holdout_index_path.exists():
+                holdout_index = load_label_index(holdout_index_path)
+                print(f"Using original holdout index from {holdout_index_path}")
+            else:
+                holdout_index = build_label_index(ds_holdout)
+                save_label_index(holdout_index, holdout_index_path)
+
+        cfg_kwargs = {**BASELINE_CONFIG, **cfg_overrides}
+        cfg = TrainConfig(run_name=run_name, **cfg_kwargs)
+
+        model, history_df, summary, run_dir = train_two_stage(
+            cfg=cfg,
+            ds_train=ds_train,
+            train_label_index=train_label_index,
+            ds_holdout=ds_holdout,
+            holdout_label_index=holdout_index,
+            splits=splits,
+            evaluate_test=True,
+            evaluate_holdout=True,
+            output_dir=runs_dir,
+        )
+
+        if plot:
+            if summary.get("holdout_y_true") is not None:
+                print("\n" + "=" * 70)
+                print("HOLDOUT EVALUATION SUITE")
+                print("=" * 70)
+                plot_evaluation_suite(
+                    history_df=history_df,
+                    y_true=summary["holdout_y_true"],
+                    y_pred=summary["holdout_y_pred"],
+                    class_ids=summary["class_ids"],
+                    run_name=f"{cfg.run_name} (Holdout)",
+                    ds=ds_holdout,
+                    sample_indices=summary.get("holdout_indices"),
+                    id_to_name=id_to_name,
+                    train_label_index=holdout_label_index,
+                )
+            else:
+                plot_training_history(history_df, run_name=cfg.run_name)
+
+        _cleanup(model)
+        return history_df, summary, run_dir
+
+    return SimpleNamespace(
+        run=run,
+        run_or_load=run_or_load,
+        run_many=run_many,
+        df=df,
+        reset=reset,
+        load_cached=load_cached,
+        load_all_cached=load_all_cached,
+        final_holdout=final_holdout,
+        results=results,
+        runs_dir=runs_dir,
+    )
+
+
+# =============================================================================
+# HYPERPARAMETER TUNING UTILITIES
+# =============================================================================
+
+
+def create_tuning_subset(
+    train_label_index: Dict[int, np.ndarray],
+    class_id_to_idx: Dict[int, int],
+    subset_frac: float = 0.20,
+    val_frac: float = 0.20,
+    test_frac: float = 0.0,
+    seed: int = 42,
+) -> Tuple["SplitIndices", Dict[int, np.ndarray]]:
+    """Create a stratified subset of training data for fast hyperparameter tuning.
+
+    Args:
+        train_label_index: Dict mapping class_id to array of dataset indices.
+        class_id_to_idx: Dict mapping class_id to model index.
+        subset_frac: Fraction of data to use for tuning. Defaults to 0.20.
+        val_frac: Fraction of subset for validation. Defaults to 0.20.
+        test_frac: Fraction of subset for test. Defaults to 0.0 for speed.
+        seed: Random seed for reproducibility. Defaults to 42.
+
+    Returns:
+        Tuple containing:
+            - subset_splits: SplitIndices for the subset
+            - subset_label_index: Reduced label index (for weighted sampler)
+    """
+    rng = np.random.default_rng(seed)
+    subset_label_index = {}
+
+    for class_id, indices in train_label_index.items():
+        n_samples = max(1, int(len(indices) * subset_frac))
+        sampled = rng.choice(indices, size=min(n_samples, len(indices)), replace=False)
+        subset_label_index[class_id] = sampled
+
+    subset_splits = split_label_index_stratified(
+        subset_label_index,
+        class_id_to_idx=class_id_to_idx,
+        val_frac=val_frac,
+        test_frac=test_frac,
+        seed=seed,
+    )
+
+    return subset_splits, subset_label_index
+
+
+def suggest_aug_params(trial: optuna.Trial) -> dict:
+    """Suggest augmentation hyperparameters for Optuna.
+
+    Augmentations searched:
+        - Horizontal flip: Safe for birds (left/right symmetry)
+        - ShiftScaleRotate: Scale (zoom) + rotation, no shift (bbox_crop centers bird)
+        - Brightness/Contrast: Lighting variation
+        - Hue/Saturation: Color variation (careful with plumage colors)
+        - CLAHE: Adaptive contrast (helps with shadowy/bright images)
+        - Blur: Simulates focus issues
+        - Noise: Simulates sensor noise
+        - Cutout: Occlusion regularization
+
+    Args:
+        trial: Optuna trial object for suggesting hyperparameters.
+
+    Returns:
+        Dict of augmentation parameters with keys for each transform type.
+    """
+    return {
+        # Horizontal flip
+        "p_hflip": trial.suggest_float("p_hflip", 0.0, 0.5),
+        # Scale + Rotate (ShiftScaleRotate with shift=0)
+        "p_affine": trial.suggest_float("p_affine", 0.0, 0.5),
+        "scale_limit": trial.suggest_float("scale_limit", 0.05, 0.2),
+        "rotate_limit": trial.suggest_int("rotate_limit", 5, 30),
+        # Brightness and contrast
+        "p_brightness_contrast": trial.suggest_float("p_brightness_contrast", 0.0, 0.5),
+        "brightness_limit": trial.suggest_float("brightness_limit", 0.05, 0.3),
+        "contrast_limit": trial.suggest_float("contrast_limit", 0.05, 0.3),
+        # Hue and saturation
+        "p_hue_sat": trial.suggest_float("p_hue_sat", 0.0, 0.4),
+        "hue_shift": trial.suggest_int("hue_shift", 5, 20),
+        "sat_shift": trial.suggest_int("sat_shift", 10, 30),
+        # CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        "p_clahe": trial.suggest_float("p_clahe", 0.0, 0.4),
+        "clahe_clip_limit": trial.suggest_float("clahe_clip_limit", 1.0, 4.0),
+        # Blur
+        "p_blur": trial.suggest_float("p_blur", 0.0, 0.3),
+        "blur_limit": trial.suggest_int("blur_limit", 3, 7, step=2),
+        # Noise
+        "p_noise": trial.suggest_float("p_noise", 0.0, 0.3),
+        # Cutout / CoarseDropout
+        "p_cutout": trial.suggest_float("p_cutout", 0.0, 0.5),
+        "cutout_holes": trial.suggest_int("cutout_holes", 1, 8),
+        "cutout_size": trial.suggest_float("cutout_size", 0.02, 0.15),
+    }
+
+
+def aug_objective(
+    trial: optuna.Trial,
+    ds_train: DeepLakeDataset,
+    tuning_label_index: Dict[int, np.ndarray],
+    tuning_splits: "SplitIndices",
+    best_preprocess: str,
+    fast_head_epochs: int,
+    fast_finetune_epochs: int,
+) -> float:
+    """Optuna objective for augmentation search.
+
+    Args:
+        trial: Optuna trial object.
+        ds_train: DeepLake training dataset.
+        tuning_label_index: Label index for the tuning subset.
+        tuning_splits: Train/val splits for tuning.
+        best_preprocess: Preprocessing mode to use ('native' or 'bbox_crop').
+        fast_head_epochs: Number of head training epochs.
+        fast_finetune_epochs: Number of finetune epochs.
+
+    Returns:
+        Best validation F1 score achieved during training.
+
+    Raises:
+        optuna.TrialPruned: If the trial is pruned during training.
+    """
+    aug_params = suggest_aug_params(trial)
+
+    cfg = TrainConfig(
+        run_name=f"optuna_aug_{trial.number}",
+        preprocess_mode=best_preprocess,
+        augmentation="recipe",
+        augmentation_params=aug_params,
+        head_epochs=fast_head_epochs,
+        finetune_epochs=fast_finetune_epochs,
+        early_stop_patience=2,
+        use_torch_compile=True,
+    )
+
+    def _on_epoch_end(stage: str, val_metrics: dict, global_epoch: int) -> None:
+        trial.report(val_metrics["f1"], global_epoch)
+        if trial.should_prune():
+            raise optuna.TrialPruned()
+
+    model, history_df, summary, run_dir = train_two_stage(
+        cfg=cfg,
+        ds_train=ds_train,
+        train_label_index=tuning_label_index,
+        splits=tuning_splits,
+        evaluate_test=False,
+        evaluate_holdout=False,
+        on_epoch_end=_on_epoch_end,
+    )
+
+    del model
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    return float(summary.get("val_best_f1", 0.0))
+
+
+def suggest_hpo_params(trial: optuna.Trial) -> dict:
+    """Suggest comprehensive hyperparameters for model tuning.
+
+    Args:
+        trial: Optuna trial object.
+
+    Returns:
+        Dict of hyperparameters including optimizer, learning rates,
+        regularization, loss function, and scheduler settings.
+    """
+    # Optimizer choice
+    optimizer = trial.suggest_categorical("optimizer", ["adamw", "sgd"])
+
+    # Learning rates (log scale for better exploration)
+    lr_head = trial.suggest_float("lr_head", 1e-4, 1e-2, log=True)
+    lr_backbone = trial.suggest_float("lr_backbone", 1e-6, 1e-4, log=True)
+    lr_head_finetune = trial.suggest_float("lr_head_finetune", 1e-5, 1e-3, log=True)
+
+    # SGD-specific: momentum (only relevant if optimizer is SGD)
+    momentum = (
+        trial.suggest_float("momentum", 0.85, 0.99) if optimizer == "sgd" else 0.9
+    )
+
+    # Regularization
+    weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-2, log=True)
+    dropout = trial.suggest_float("dropout", 0.1, 0.5)
+    grad_clip_norm = trial.suggest_float("grad_clip_norm", 0.5, 5.0)
+
+    # Loss function
+    loss_fn = trial.suggest_categorical(
+        "loss_fn", ["cross_entropy", "focal", "label_smoothing"]
+    )
+
+    # Loss-specific parameters
+    label_smoothing = (
+        trial.suggest_float("label_smoothing", 0.05, 0.2)
+        if loss_fn == "label_smoothing"
+        else 0.0
+    )
+    focal_gamma = (
+        trial.suggest_float("focal_gamma", 1.0, 3.0) if loss_fn == "focal" else 2.0
+    )
+
+    # Learning rate scheduler
+    scheduler = trial.suggest_categorical("scheduler", ["none", "cosine", "onecycle"])
+
+    return {
+        "optimizer": optimizer,
+        "lr_head": lr_head,
+        "lr_backbone": lr_backbone,
+        "lr_head_finetune": lr_head_finetune,
+        "momentum": momentum,
+        "weight_decay": weight_decay,
+        "dropout": dropout,
+        "grad_clip_norm": grad_clip_norm,
+        "loss_fn": loss_fn,
+        "label_smoothing": label_smoothing,
+        "focal_gamma": focal_gamma,
+        "scheduler": scheduler,
+    }
+
+
+def create_fast_objective(
+    ds_train: DeepLakeDataset,
+    tuning_splits: "SplitIndices",
+    tuning_label_index: Dict[int, np.ndarray],
+    best_preprocess: str,
+    best_augmentation: str,
+    best_augmentation_params: Optional[dict],
+    head_epochs: int,
+    finetune_epochs: int,
+) -> Callable[[optuna.Trial], float]:
+    """Create an Optuna objective with speed optimizations (torch.compile enabled).
+
+    Args:
+        ds_train: DeepLake training dataset.
+        tuning_splits: Train/val splits for tuning.
+        tuning_label_index: Label index for the tuning subset.
+        best_preprocess: Preprocessing mode to use.
+        best_augmentation: Augmentation mode to use.
+        best_augmentation_params: Augmentation parameters (if using 'recipe').
+        head_epochs: Number of head training epochs per trial.
+        finetune_epochs: Number of finetune epochs per trial.
+
+    Returns:
+        Optuna objective function with torch.compile enabled.
+    """
+
+    def objective(trial: optuna.Trial) -> float:
+        params = suggest_hpo_params(trial)
+
+        cfg = TrainConfig(
+            run_name=f"optuna_hpo_{trial.number}",
+            preprocess_mode=best_preprocess,
+            augmentation=best_augmentation,
+            augmentation_params=best_augmentation_params,
+            lr_head=params["lr_head"],
+            lr_backbone=params["lr_backbone"],
+            lr_head_finetune=params["lr_head_finetune"],
+            optimizer=params["optimizer"],
+            momentum=params["momentum"],
+            weight_decay=params["weight_decay"],
+            dropout=params["dropout"],
+            grad_clip_norm=params["grad_clip_norm"],
+            loss_fn=params["loss_fn"],
+            label_smoothing=params["label_smoothing"],
+            focal_gamma=params["focal_gamma"],
+            scheduler=params["scheduler"],
+            head_epochs=head_epochs,
+            finetune_epochs=finetune_epochs,
+            early_stop_patience=2,
+            use_torch_compile=True,
+        )
+
+        def _on_epoch_end(stage: str, val_metrics: dict, global_epoch: int) -> None:
+            trial.report(val_metrics["f1"], global_epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+
+        model, history_df, summary, run_dir = train_two_stage(
+            cfg=cfg,
+            ds_train=ds_train,
+            train_label_index=tuning_label_index,
+            splits=tuning_splits,
+            evaluate_test=False,
+            evaluate_holdout=False,
+            on_epoch_end=_on_epoch_end,
+        )
+
+        del model
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+        return float(summary.get("val_best_f1", 0.0))
+
+    return objective
+
+
+# =============================================================================
+# EVALUATION UTILITIES
+# =============================================================================
+
+
+def get_class_name(
+    model_idx: int,
+    idx_to_class_id: Dict[int, int],
+    class_names: List[str],
+) -> str:
+    """Get class name from model index.
+
+    Args:
+        model_idx: Model's internal class index.
+        idx_to_class_id: Dict mapping model index to original class ID.
+        class_names: List of class names indexed by class ID.
+
+    Returns:
+        Class name string.
+    """
+    class_id = idx_to_class_id.get(model_idx, model_idx)
+    if class_id < len(class_names):
+        return class_names[class_id]
+    return f"Class_{class_id}"
+
+
+def compute_confused_pairs(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    top_n: int = 20,
+) -> List[Dict[str, int]]:
+    """Identify the most frequently confused class pairs from predictions.
+
+    Computes a confusion matrix and extracts off-diagonal elements
+    (misclassifications) sorted by frequency.
+
+    Args:
+        y_true: Ground truth labels as numpy array or list.
+        y_pred: Predicted labels as numpy array or list.
+        top_n: Number of top confused pairs to return. Defaults to 20.
+
+    Returns:
+        List of dicts with 'true_class', 'pred_class', and 'count' keys,
+        sorted by count in descending order. Empty list if no confusions.
+    """
+    from sklearn.metrics import confusion_matrix as sklearn_cm
+
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    unique_classes = np.unique(np.concatenate([y_true, y_pred]))
+    cm = sklearn_cm(y_true, y_pred, labels=unique_classes)
+
+    confused_pairs = []
+    for i, true_cls in enumerate(unique_classes):
+        for j, pred_cls in enumerate(unique_classes):
+            if i != j and cm[i, j] > 0:
+                confused_pairs.append(
+                    {
+                        "true_class": int(true_cls),
+                        "pred_class": int(pred_cls),
+                        "count": int(cm[i, j]),
+                    }
+                )
+
+    confused_pairs.sort(key=lambda x: -x["count"])
+    return confused_pairs[:top_n]
+
+
+def prepare_lime_image(
+    ds: DeepLakeDataset,
+    idx: int,
+    preprocess_mode: str,
+    bbox_padding_ratio: float = 0.15,
+    pad_to_square: bool = True,
+) -> np.ndarray:
+    """Prepare a base image for LIME that matches training preprocessing.
+
+    Applies the same preprocessing pipeline used during training to ensure
+    LIME explanations are computed on the same representation the model sees.
+
+    Args:
+        ds: DeepLake dataset containing images and bounding boxes.
+        idx: Sample index in the dataset.
+        preprocess_mode: Preprocessing mode ('native' or 'bbox_crop').
+        bbox_padding_ratio: Padding ratio for bbox crop. Defaults to 0.15.
+        pad_to_square: Whether to pad the image to square. Defaults to True.
+
+    Returns:
+        Preprocessed image as uint8 RGB numpy array with shape (H, W, 3).
+
+    Raises:
+        IndexError: If idx is out of bounds for the dataset.
+        KeyError: If required fields ('images', 'boxes') are missing from dataset.
+    """
+    sample = ds[int(idx)]
+    img = _ensure_uint8_rgb(sample["images"].numpy())
+
+    if preprocess_mode == "bbox_crop":
+        box = sample["boxes"].numpy()
+        img = apply_bbox_crop_optimized(img, box, padding_ratio=bbox_padding_ratio)
+        img = _ensure_uint8_rgb(img)
+
+    if pad_to_square:
+        img = _pad_to_square(img)
+
+    return img
